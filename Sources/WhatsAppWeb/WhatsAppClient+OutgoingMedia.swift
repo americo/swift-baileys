@@ -5,6 +5,7 @@ public enum OutgoingMediaContent: Equatable, Sendable {
 	case video(OutgoingVideoContent)
 	case audio(OutgoingAudioContent)
 	case document(OutgoingDocumentContent)
+	case sticker(OutgoingStickerContent)
 
 	fileprivate var uploadType: MediaType {
 		switch self {
@@ -12,6 +13,7 @@ public enum OutgoingMediaContent: Equatable, Sendable {
 		case .video: .video
 		case .audio: .audio
 		case .document: .document
+		case .sticker: .sticker
 		}
 	}
 }
@@ -69,6 +71,12 @@ extension WhatsAppClient {
 				fileEncSha256: encrypted.fileEncSha256, fileSha256: encrypted.fileSha256,
 				fileLength: fileLength, mediaKeyTimestamp: timestamp, audio: audio
 			))
+		case .sticker(let sticker):
+			return MessageContentBuilder.uploadedSticker(UploadedStickerContent(
+				url: url, directPath: directPath, mediaKey: uploaded.mediaKey,
+				fileEncSha256: encrypted.fileEncSha256, fileSha256: encrypted.fileSha256,
+				fileLength: fileLength, mediaKeyTimestamp: timestamp, sticker: sticker
+			))
 		case .document(let document):
 			return MessageContentBuilder.uploadedDocument(UploadedDocumentContent(
 				url: url, directPath: directPath, mediaKey: uploaded.mediaKey,
@@ -112,6 +120,8 @@ extension MessageContentBuilder {
 			message.audioMessage.contextInfo = merged(message.audioMessage.contextInfo)
 		} else if message.hasDocumentMessage {
 			message.documentMessage.contextInfo = merged(message.documentMessage.contextInfo)
+		} else if message.hasStickerMessage {
+			message.stickerMessage.contextInfo = merged(message.stickerMessage.contextInfo)
 		}
 		return message
 	}
