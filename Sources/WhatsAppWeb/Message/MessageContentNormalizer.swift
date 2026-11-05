@@ -12,6 +12,21 @@ enum MessageContentNormalizer {
 		return content
 	}
 
+	/// Whether the message is a view once one: wrapped in a view once envelope, or media flagged `viewOnce`.
+	static func isViewOnce(_ message: Proto_Message) -> Bool {
+		var content = message
+		for _ in 0..<5 {
+			if content.hasViewOnceMessage || content.hasViewOnceMessageV2 || content.hasViewOnceMessageV2Extension {
+				return true
+			}
+			guard let inner = wrapperContent(of: content) else { break }
+			content = inner
+		}
+		return (content.hasImageMessage && content.imageMessage.viewOnce)
+			|| (content.hasVideoMessage && content.videoMessage.viewOnce)
+			|| (content.hasAudioMessage && content.audioMessage.viewOnce)
+	}
+
 	static func extractedContent(_ message: Proto_Message) -> Proto_Message {
 		let content = normalized(message)
 		if content.hasButtonsMessage {

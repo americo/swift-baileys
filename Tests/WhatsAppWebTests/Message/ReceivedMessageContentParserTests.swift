@@ -23,6 +23,20 @@ struct ReceivedMessageContentParserTests {
 		#expect(content == .text("extended hello"))
 	}
 
+	@Test("detects view once messages")
+	func detectsViewOnceMessages() {
+		let inner = MessageContentBuilder.text("wrapped")
+
+		#expect(MessageContentNormalizer.isViewOnce(MessageContentBuilder.viewOnce(inner)))
+		#expect(MessageContentNormalizer.isViewOnce(futureProofMessage(inner) { $0.viewOnceMessageV2 = $1 }))
+		#expect(!MessageContentNormalizer.isViewOnce(inner))
+		#expect(!MessageContentNormalizer.isViewOnce(futureProofMessage(inner) { $0.ephemeralMessage = $1 }))
+
+		var flagged = Proto_Message()
+		flagged.imageMessage.viewOnce = true
+		#expect(MessageContentNormalizer.isViewOnce(flagged))
+	}
+
 	@Test("parses future proof envelopes")
 	func parsesFutureProofEnvelopes() throws {
 		let inner = MessageContentBuilder.text("wrapped")

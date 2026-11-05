@@ -31,6 +31,8 @@ public struct ReceivedMessage: Equatable, Sendable {
 	public let starred: Bool
 	/// Background and text colour of an extended text message (set on text status updates).
 	public let textStyle: ReceivedTextStyle?
+	/// Sent as a view once message (photo, video or voice note that opens a single time).
+	public let isViewOnce: Bool
 
 	public init(
 		id: String,
@@ -46,7 +48,8 @@ public struct ReceivedMessage: Equatable, Sendable {
 		messageSecret: Data? = nil,
 		reactions: [ReceivedReactionContent] = [],
 		starred: Bool = false,
-		textStyle: ReceivedTextStyle? = nil
+		textStyle: ReceivedTextStyle? = nil,
+		isViewOnce: Bool = false
 	) {
 		self.id = id
 		self.from = from
@@ -62,6 +65,7 @@ public struct ReceivedMessage: Equatable, Sendable {
 		self.reactions = reactions
 		self.starred = starred
 		self.textStyle = textStyle
+		self.isViewOnce = isViewOnce
 	}
 }
 

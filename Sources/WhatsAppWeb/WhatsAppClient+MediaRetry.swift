@@ -162,7 +162,8 @@ private extension ReceivedMessage {
 			keyParticipant: keyParticipant,
 			status: status,
 			pushName: pushName,
-			stub: stub
+			stub: stub,
+			isViewOnce: isViewOnce
 		)
 	}
 }

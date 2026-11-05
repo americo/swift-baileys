@@ -34,7 +34,8 @@ enum ReceivedWebMessageInfoParser {
 			messageSecret: info.hasMessage ? secret(of: info.message) : nil,
 			reactions: info.reactions.map(reaction),
 			starred: info.starred,
-			textStyle: info.hasMessage ? textStyle(of: info.message) : nil
+			textStyle: info.hasMessage ? textStyle(of: info.message) : nil,
+			isViewOnce: info.hasMessage && MessageContentNormalizer.isViewOnce(info.message)
 		)
 	}
 
