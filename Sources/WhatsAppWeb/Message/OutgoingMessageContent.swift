@@ -258,6 +258,28 @@ public struct OutgoingProductContent: Equatable, Sendable {
 	}
 }
 
+public struct OutgoingImageContent: Equatable, Sendable {
+	public let mimetype: String
+	public let caption: String?
+	public let width: UInt32?
+	public let height: UInt32?
+	public let jpegThumbnail: Data?
+
+	public init(
+		mimetype: String = "image/jpeg",
+		caption: String? = nil,
+		width: UInt32? = nil,
+		height: UInt32? = nil,
+		jpegThumbnail: Data? = nil
+	) {
+		self.mimetype = mimetype
+		self.caption = caption
+		self.width = width
+		self.height = height
+		self.jpegThumbnail = jpegThumbnail
+	}
+}
+
 public struct OutgoingDocumentContent: Equatable, Sendable {
 	public let mimetype: String
 	public let fileName: String?
