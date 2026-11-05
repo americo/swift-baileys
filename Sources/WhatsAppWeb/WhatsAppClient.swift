@@ -99,6 +99,7 @@ public actor WhatsAppClient {
 	var signedPreKeySigner: (any SignalSignedPreKeySigning)?
 	var eventResponseContextResolver: (any EventResponseContextResolving)?
 	var pollVoteContextResolver: (any PollVoteContextResolving)?
+	var messageSecretResolver: (any MessageSecretResolving)?
 	var linkPreviewResolver: (any LinkPreviewResolving)?
 	var mediaUploader: (any WhatsAppMediaUploading)?
 	let mediaDownloader: WhatsAppMediaDownloader

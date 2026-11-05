@@ -115,6 +115,13 @@ extension WhatsAppClient {
 				participantAlt: node.attrs["participant_alt"] ?? node.attrs["participantAlt"],
 				timestamp: timestamp
 			)
+			await emitSecretEncryptedEditIfNeeded(
+				for: content,
+				messageID: messageID,
+				from: from,
+				participant: participant,
+				timestamp: timestamp
+			)
 			emitMessageActionUpdateIfNeeded(
 				for: content,
 				messageID: messageID,
@@ -421,6 +428,47 @@ extension WhatsAppClient {
 			]))
 		default:
 			break
+		}
+	}
+
+	/// An edit sent as a secret-encrypted message: decrypt it with the edited message's secret.
+	private func emitSecretEncryptedEditIfNeeded(
+		for content: ReceivedMessageContent,
+		messageID: String,
+		from: String?,
+		participant: String?,
+		timestamp: UInt64?
+	) async {
+		guard case .secretEncrypted(let secret) = content, secret.type == .messageEdit,
+			  let target = secret.targetMessageKey, let targetID = target.id else { return }
+		let envelopeKey = WhatsAppMessageKey(remoteJID: from, fromMe: false, id: messageID, participant: participant)
+		guard let resolver = messageSecretResolver,
+			  let context = await resolver.context(forMessageID: targetID) else {
+			WhatsAppLog.logger.error("edit of \(targetID, privacy: .public) ignored: its message secret is unknown")
+			return
+		}
+		let editor = participant ?? from ?? context.senderJID
+		do {
+			let edited = try SecretEncryptedEditCipher().decrypt(
+				secret,
+				originalMessageID: targetID,
+				originalSenderJID: context.senderJID,
+				editorJID: editor,
+				secret: context.secret
+			)
+			guard let edited else { return }
+			eventContinuation.yield(.messagesUpdated([
+				ReceivedMessageUpdate(
+					key: updateKey(from: target, fallback: envelopeKey),
+					status: nil,
+					timestamp: timestamp,
+					content: edited,
+					protocolMessageKey: envelopeKey,
+					protocolAction: .edit
+				)
+			]))
+		} catch {
+			WhatsAppLog.logger.error("edit of \(targetID, privacy: .public) not decrypted: \(String(describing: error), privacy: .public)")
 		}
 	}
 
