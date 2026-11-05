@@ -14,7 +14,7 @@ struct MessageDeviceResolverTests {
 
 		let devices = try await resolver.deviceJIDs(for: "123@s.whatsapp.net")
 
-		#expect(devices == ["123:0@s.whatsapp.net", "123:2@s.whatsapp.net"])
+		#expect(devices == ["123@s.whatsapp.net", "123:2@s.whatsapp.net"])
 		#expect(
 			await query.requests == [
 				BinaryNode(

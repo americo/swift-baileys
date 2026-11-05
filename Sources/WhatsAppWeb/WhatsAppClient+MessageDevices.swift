@@ -37,9 +37,11 @@ extension WhatsAppClient {
 
 			let resolved = try await messageDeviceResolver.deviceJIDs(for: jid.normalizedUser, useCache: useCache)
 			for resolvedJID in resolved {
-				guard let deviceJID = parseResolvedDeviceJID(resolvedJID), let device = deviceJID.device else {
+				guard let deviceJID = parseResolvedDeviceJID(resolvedJID) else {
 					continue
 				}
+				// A JID without a device part is the primary device.
+				let device = deviceJID.device ?? 0
 
 				if ignoreZeroDevices && device == 0 {
 					continue
@@ -53,7 +55,7 @@ extension WhatsAppClient {
 	}
 
 	private func parseResolvedDeviceJID(_ rawValue: String) -> JID? {
-		if let jid = JID(rawValue), jid.device != nil {
+		if let jid = JID(rawValue), jid.device != nil || !rawValue.prefix(while: { $0 != "@" }).contains(".") {
 			return jid
 		}
 

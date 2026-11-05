@@ -50,7 +50,7 @@ struct PublicNativeSignalAdapterDependencyTests {
 			SignalProtocolAddress(name: "123", deviceID: 1)
 		])
 		#expect(await adapter.checkedAddresses == [[
-			SignalSessionAddressCheck(jid: "123:0@s.whatsapp.net", address: SignalProtocolAddress(name: "123", deviceID: 0)),
+			SignalSessionAddressCheck(jid: "123@s.whatsapp.net", address: SignalProtocolAddress(name: "123", deviceID: 0)),
 			SignalSessionAddressCheck(jid: "123:1@s.whatsapp.net", address: SignalProtocolAddress(name: "123", deviceID: 1))
 		]])
 		#expect(await adapter.installedRequests.map(\.address) == [
@@ -193,7 +193,7 @@ struct PublicNativeSignalAdapterDependencyTests {
 
 		#expect(messageID == "3EB0NATIVE")
 		#expect(await adapter.checkedAddresses == [[
-			SignalSessionAddressCheck(jid: "123:0@s.whatsapp.net", address: SignalProtocolAddress(name: "123", deviceID: 0)),
+			SignalSessionAddressCheck(jid: "123@s.whatsapp.net", address: SignalProtocolAddress(name: "123", deviceID: 0)),
 			SignalSessionAddressCheck(jid: "123:1@s.whatsapp.net", address: SignalProtocolAddress(name: "123", deviceID: 1))
 		]])
 		#expect(await adapter.installedRequests.map(\.address) == [

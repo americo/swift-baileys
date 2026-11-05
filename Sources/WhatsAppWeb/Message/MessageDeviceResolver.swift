@@ -115,7 +115,8 @@ public struct USyncMessageDeviceResolver: MessageDeviceResolving {
 					server = userJID.server
 				}
 
-				devices.append(JID.encode(user: userJID.user, server: server, device: id))
+				// The primary device (0) is addressed without a device suffix; ":0" fails server validation.
+				devices.append(JID.encode(user: userJID.user, server: server, device: id == 0 ? nil : id))
 			}
 		}
 
