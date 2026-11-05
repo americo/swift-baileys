@@ -87,3 +87,23 @@ private actor RecordingMediaConnectionQuery {
 		return response
 	}
 }
+
+@Suite("Media connection host limits")
+struct MediaConnectionHostLimitTests {
+	@Test("a host without a stated limit is accepted")
+	func hostWithoutLimit() throws {
+		let response = BinaryNode(
+			tag: "iq",
+			attrs: ["type": "result"],
+			content: .nodes([
+				BinaryNode(
+					tag: "media_conn",
+					attrs: ["auth": "token", "ttl": "300"],
+					content: .nodes([BinaryNode(tag: "host", attrs: ["hostname": "mmg.whatsapp.net"])])
+				)
+			])
+		)
+		let connection = try MediaConnectionResolver.parseConnection(from: response)
+		#expect(connection.hosts == [MediaConnectionHost(hostname: "mmg.whatsapp.net")])
+	}
+}

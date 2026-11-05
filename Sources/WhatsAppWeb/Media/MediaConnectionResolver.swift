@@ -2,9 +2,10 @@ import Foundation
 
 public struct MediaConnectionHost: Equatable, Sendable {
 	public let hostname: String
-	public let maxContentLengthBytes: Int
+	/// Not every server response states a limit.
+	public let maxContentLengthBytes: Int?
 
-	public init(hostname: String, maxContentLengthBytes: Int) {
+	public init(hostname: String, maxContentLengthBytes: Int? = nil) {
 		self.hostname = hostname
 		self.maxContentLengthBytes = maxContentLengthBytes
 	}
@@ -56,15 +57,18 @@ public struct MediaConnectionResolver: Sendable {
 			  let ttl = Int(ttlValue),
 			  !auth.isEmpty,
 			  ttl > 0 else {
+			let connection = response.firstChild(named: "media_conn")
+			WhatsAppLog.logger.error("media_conn rejected: type=\(response.attrs["type"] ?? "-", privacy: .public) hasAuth=\(connection?.attrs["auth"] != nil) ttl=\(connection?.attrs["ttl"] ?? "-", privacy: .public)")
 			throw MediaConnectionResolverError.invalidResponse
 		}
 
 		let hosts = try mediaConnection.children(named: "host").map { hostNode in
+			let maxContentLengthValue = hostNode.attrs["maxContentLengthBytes"]
+			let maxContentLengthBytes = maxContentLengthValue.flatMap { Int($0) }
 			guard let hostname = hostNode.attrs["hostname"],
-				  let maxContentLengthValue = hostNode.attrs["maxContentLengthBytes"],
-				  let maxContentLengthBytes = Int(maxContentLengthValue),
 				  !hostname.isEmpty,
-				  maxContentLengthBytes > 0 else {
+				  maxContentLengthValue == nil || (maxContentLengthBytes ?? 0) > 0 else {
+				WhatsAppLog.logger.error("media_conn host rejected: hostname=\(hostNode.attrs["hostname"] ?? "-", privacy: .public) maxContentLengthBytes=\(maxContentLengthValue ?? "-", privacy: .public)")
 				throw MediaConnectionResolverError.invalidResponse
 			}
 

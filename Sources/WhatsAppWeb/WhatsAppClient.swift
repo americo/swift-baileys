@@ -113,6 +113,8 @@ public actor WhatsAppClient {
 	let requestCoordinator = IQRequestCoordinator()
 	private var transport: (any WhatsAppWebSocketTransport)?
 	private var receiveTask: Task<Void, Never>?
+	/// Last frame handed to the socket. See `sendInOrder`.
+	private var lastOutboundFrame: Task<Void, Error>?
 	var outboundFrameCodec = NoiseFrameCodec()
 	var noiseTransport: NoiseTransportState?
 	var keepAliveTask: Task<Void, Never>?
@@ -370,7 +372,24 @@ public actor WhatsAppClient {
 			throw WhatsAppClientError.notConnected
 		}
 
-		try await transport.send(data)
+		try await sendInOrder(data, through: transport)
+	}
+
+	/// Encrypts and sends as one step, so a frame's Noise counter matches its position on the wire.
+	private func encryptAndSend(_ payload: Data, through transport: any WhatsAppWebSocketTransport) async throws {
+		try await sendInOrder(encodeOutboundFrame(payload), through: transport)
+	}
+
+	/// Frames are numbered when encrypted and the server rejects any that arrive out of order
+	/// (`bad-mac`). Concurrent callers would otherwise race to the socket once they leave the actor.
+	private func sendInOrder(_ frame: Data, through transport: any WhatsAppWebSocketTransport) async throws {
+		let previous = lastOutboundFrame
+		let sending = Task {
+			_ = await previous?.result
+			try await transport.send(frame)
+		}
+		lastOutboundFrame = sending
+		try await sending.value
 	}
 
 	public func query(_ node: BinaryNode, timeout: Duration = .seconds(60)) async throws -> BinaryNode {
@@ -386,13 +405,12 @@ public actor WhatsAppClient {
 		}
 
 		let payload = try BinaryNodeEncoder().encode(node)
-		let frame = try encodeOutboundFrame(payload)
 		WhatsAppLog.logger.notice("query -> \(node.tag, privacy: .public) xmlns=\(node.attrs["xmlns"] ?? "-", privacy: .public) type=\(node.attrs["type"] ?? "-", privacy: .public) id=\(id, privacy: .public) bytes=\(payload.count)")
 
 		let response: BinaryNode
 		do {
 			response = try await requestCoordinator.perform(id: id, timeout: timeout) {
-				try await transport.send(frame)
+				try await self.encryptAndSend(payload, through: transport)
 			}
 		} catch {
 			WhatsAppLog.logger.error("query failed id=\(id, privacy: .public) xmlns=\(node.attrs["xmlns"] ?? "-", privacy: .public): \(String(describing: error), privacy: .public)")
@@ -513,9 +531,27 @@ public actor WhatsAppClient {
 		eventContinuation.yield(.disconnected(reason: reason))
 	}
 
+	/// Runs on a transport without the handshake, which needs real credentials. For tests.
+	func attach(transport: any WhatsAppWebSocketTransport) {
+		self.transport = transport
+		state = .connected
+		startReceiveLoop(transport: transport, codec: NoiseFrameCodec())
+	}
+
 	private func startReceiveLoop(transport: any WhatsAppWebSocketTransport, codec initialCodec: NoiseFrameCodec) {
 		receiveTask?.cancel()
+		lastOutboundFrame = nil
+		// Handlers may query the server (prekey uploads, retries), and only this loop can read the
+		// reply. Replies are delivered here; everything else runs in order on a separate task, or a
+		// handler that queries would block the loop until its own request timed out.
+		let (nodes, nodeQueue) = AsyncStream.makeStream(of: BinaryNode.self)
+		Task {
+			for await node in nodes {
+				await handleIncomingNode(node)
+			}
+		}
 		receiveTask = Task {
+			defer { nodeQueue.finish() }
 			var codec = initialCodec
 			let decoder = BinaryNodeDecoder()
 
@@ -529,7 +565,11 @@ public actor WhatsAppClient {
 					for frame in codec.decode(data) {
 						let plain = try await self.decryptInboundFrame(frame)
 						let node = try decoder.decode(plain)
-						await handleIncomingNode(node)
+						if await requestCoordinator.isAwaiting(node) {
+							await handleIncomingNode(node)
+						} else {
+							nodeQueue.yield(node)
+						}
 					}
 				} catch {
 					await finishReceiveLoop(reason: "Receive Loop Error (\(error))")
@@ -570,7 +610,7 @@ public actor WhatsAppClient {
 			WhatsAppLog.logger.notice("send message id=\(node.attrs["id"] ?? "-", privacy: .public) to=\(node.attrs["to"] ?? "-", privacy: .public) enc=\(Self.encTypes(in: node).joined(separator: ","), privacy: .public) identity=\(node.firstChild(named: "device-identity") != nil)")
 		}
 		let payload = try BinaryNodeEncoder().encode(node)
-		try await transport.send(encodeOutboundFrame(payload))
+		try await encryptAndSend(payload, through: transport)
 	}
 
 	/// A message that opens a Signal session (`pkmsg`) must carry the account's signed device identity,
