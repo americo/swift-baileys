@@ -34,6 +34,20 @@ struct MessageStanzaClassifierTests {
 		#expect(encAttribute(of: result) == nil)
 	}
 
+	@Test("a reaction travels as a reaction stanza that hides decryption failures")
+	func reactionStanza() async throws {
+		let message = MessageContentBuilder.reaction(
+			"❤️",
+			to: MessageReactionTarget(chatJID: "123@s.whatsapp.net", messageID: "TARGET", fromMe: false),
+			timestampMilliseconds: 1
+		)
+		let result = try await stanza(for: message)
+		let enc = result.firstChild(named: "participants")?.firstChild(named: "to")?.firstChild(named: "enc")
+		#expect(result.attrs["type"] == "reaction")
+		#expect(enc?.attrs["decrypt-fail"] == "hide")
+		#expect(enc?.attrs["mediatype"] == nil)
+	}
+
 	@Test("media travels as a media stanza naming its type", arguments: [
 		("image", { var m = Proto_Message(); m.imageMessage = .init(); return m }() as Proto_Message),
 		("document", { var m = Proto_Message(); m.documentMessage = .init(); return m }() as Proto_Message),

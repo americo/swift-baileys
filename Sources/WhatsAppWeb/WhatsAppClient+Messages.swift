@@ -157,6 +157,7 @@ extension WhatsAppClient {
 		)
 	}
 
+	/// Sends through the same route as text and media, so groups use their sender key.
 	public func sendReactionMessage(
 		to destinationJID: String,
 		reaction: String,
@@ -164,24 +165,13 @@ extension WhatsAppClient {
 		timestampMilliseconds: Int64? = nil,
 		messageID: String? = nil
 	) async throws -> String {
-		guard let messageDeviceResolver else {
-			throw WhatsAppClientError.missingMessageDeviceResolver
-		}
-
-		let recipientDeviceJIDs = try await messageDeviceResolver.deviceJIDs(for: destinationJID)
-		guard let signalSessionPreparer else {
-			throw WhatsAppClientError.missingSignalSessionPreparer
-		}
-
-		_ = try await signalSessionPreparer.assertSessions(for: recipientDeviceJIDs, force: false)
-		return try await sendDirectMessage(
+		try await sendResolvedMessage(
 			to: destinationJID,
 			message: MessageContentBuilder.reaction(
 				reaction,
 				to: target,
 				timestampMilliseconds: timestampMilliseconds ?? Int64(Date().timeIntervalSince1970 * 1000)
 			),
-			recipientDeviceJIDs: recipientDeviceJIDs,
 			messageID: messageID
 		)
 	}
