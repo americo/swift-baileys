@@ -11,6 +11,23 @@ public struct ReceivedTextStyle: Equatable, Sendable {
 	}
 }
 
+/// The message a received message replies to (`contextInfo`).
+public struct ReceivedQuote: Equatable, Sendable {
+	public let messageID: String
+	public let participant: String?
+	/// Chat the quoted message lives in, when it differs from the chat of the reply (`status@broadcast` for a status).
+	public let remoteJID: String?
+	/// Plain text or caption of the quoted message, when it has any.
+	public let text: String?
+
+	public init(messageID: String, participant: String?, remoteJID: String?, text: String?) {
+		self.messageID = messageID
+		self.participant = participant
+		self.remoteJID = remoteJID
+		self.text = text
+	}
+}
+
 public struct ReceivedMessage: Equatable, Sendable {
 	public let id: String
 	public let from: String?
@@ -33,6 +50,8 @@ public struct ReceivedMessage: Equatable, Sendable {
 	public let textStyle: ReceivedTextStyle?
 	/// Sent as a view once message (photo, video or voice note that opens a single time).
 	public let isViewOnce: Bool
+	/// What this message replies to.
+	public let quote: ReceivedQuote?
 
 	public init(
 		id: String,
@@ -49,7 +68,8 @@ public struct ReceivedMessage: Equatable, Sendable {
 		reactions: [ReceivedReactionContent] = [],
 		starred: Bool = false,
 		textStyle: ReceivedTextStyle? = nil,
-		isViewOnce: Bool = false
+		isViewOnce: Bool = false,
+		quote: ReceivedQuote? = nil
 	) {
 		self.id = id
 		self.from = from
@@ -66,6 +86,7 @@ public struct ReceivedMessage: Equatable, Sendable {
 		self.starred = starred
 		self.textStyle = textStyle
 		self.isViewOnce = isViewOnce
+		self.quote = quote
 	}
 }
 

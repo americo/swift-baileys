@@ -27,7 +27,8 @@ public enum MessageCleaner {
 			reactions: message.reactions,
 			starred: message.starred,
 			textStyle: message.textStyle,
-			isViewOnce: message.isViewOnce
+			isViewOnce: message.isViewOnce,
+			quote: message.quote
 		)
 	}
 
