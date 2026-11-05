@@ -64,7 +64,7 @@ public struct SignalGroupMessageDecryptionRequest: Equatable, Sendable {
 	public let authorAddress: SignalProtocolAddress
 
 	public init(groupJID: String, authorJID: String, ciphertext: Data) throws {
-		guard groupJID.isGroupJID else {
+		guard groupJID.isGroupJID || groupJID.isStatusBroadcastJID else {
 			throw SignalMessageDecryptionRequestValidationError.invalidGroupJID
 		}
 		guard !ciphertext.isEmpty else {
@@ -91,7 +91,7 @@ public struct SenderKeyDistributionMessageRequest: Equatable, Sendable {
 		senderKeyDistributionData: Data? = nil,
 		messageData: Data
 	) throws {
-		if let groupJID, !groupJID.isGroupJID {
+		if let groupJID, !(groupJID.isGroupJID || groupJID.isStatusBroadcastJID) {
 			throw SignalMessageDecryptionRequestValidationError.invalidGroupJID
 		}
 		guard !messageData.isEmpty else {
@@ -157,7 +157,7 @@ struct SignalIncomingMessageDecryptor: IncomingMessageDecrypting {
 			return nil
 		}
 		let authorJID = node.attrs["participant"] ?? node.attrs["from"]
-		let groupJID = node.attrs["from"].flatMap { $0.isGroupJID ? $0 : nil }
+		let groupJID = node.attrs["from"].flatMap { $0.isGroupJID || $0.isStatusBroadcastJID ? $0 : nil }
 
 		if let plaintext = firstContentData(in: node, tag: "plaintext") {
 			let message = try unwrapDeviceSentMessage(Proto_Message(serializedBytes: plaintext))
