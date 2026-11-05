@@ -327,7 +327,7 @@ struct WhatsAppClientLifecycleTests {
 		#expect(
 			stanza == BinaryNode(
 				tag: "message",
-				attrs: ["id": "3EB0TEXTMESSAGE", "to": "123@s.whatsapp.net", "type": "text", "phash": "2:b8aCUh"],
+				attrs: ["id": "3EB0TEXTMESSAGE", "to": "123@s.whatsapp.net", "type": "text"],
 				content: .nodes([
 					BinaryNode(
 						tag: "participants",

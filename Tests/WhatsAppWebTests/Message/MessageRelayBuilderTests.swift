@@ -36,8 +36,7 @@ struct MessageRelayBuilderTests {
 				attrs: [
 					"id": "3EB0TESTMESSAGEID",
 					"to": "123@s.whatsapp.net",
-					"type": "text",
-					"phash": "2:/wfv8V"
+					"type": "text"
 				],
 				content: .nodes([
 					BinaryNode(
@@ -81,10 +80,8 @@ struct MessageRelayBuilderTests {
 			recipientDeviceJIDs: ["456.0@s.whatsapp.net", "123.0@s.whatsapp.net"]
 		)
 
-		#expect(stanza.attrs["phash"] == ParticipantHashGenerator.generateV2(participants: [
-			"456.0@s.whatsapp.net",
-			"123.0@s.whatsapp.net"
-		]))
+		// One-to-one stanzas carry no phash; the server rejects it (479).
+		#expect(stanza.attrs["phash"] == nil)
 	}
 
 	@Test("preserves explicit participant hash attribute")
