@@ -164,10 +164,8 @@ struct MessageRelayBuilder: Sendable {
 			("to", destinationJID),
 			("type", "text")
 		]
-		if additionalAttributes["phash"] == nil {
-			attrs.append(("phash", ParticipantHashGenerator.generateV2(participants: recipientDeviceJIDs)))
-		}
-
+		// One-to-one stanzas carry no `phash` (that attribute is for groups); the server rejects
+		// them with SMAX_INVALID (479) when it is present.
 		for (key, value) in additionalAttributes {
 			attrs.append((key, value))
 		}

@@ -363,7 +363,7 @@ struct PublicClientDependencyTests {
 	func externalConsumersCanWireDefaultQueryBackedMessageDependencies() async throws {
 		let keys = InMemorySignalKeyStore()
 		let injector = PublicSessionInjector()
-		let sessionChecker = PublicSessionChecker(existingJIDs: ["123:0@s.whatsapp.net"])
+		let sessionChecker = PublicSessionChecker(existingJIDs: ["123@s.whatsapp.net"])
 		let mediaTransport = PublicMediaUploadTransport(result: MediaUploadTransportResult(
 			mediaURL: "https://media.example/uploaded",
 			directPath: "/v/uploaded"
@@ -386,7 +386,7 @@ struct PublicClientDependencyTests {
 			mediaType: .image
 		)
 
-		#expect(devices == ["123:0@s.whatsapp.net", "123:1@s.whatsapp.net"])
+		#expect(devices == ["123@s.whatsapp.net", "123:1@s.whatsapp.net"])
 		#expect(prepared)
 		#expect(await sessionChecker.calls == [devices])
 		#expect(await injector.bundles.map(\.jid) == ["123:1@s.whatsapp.net"])
@@ -398,7 +398,7 @@ struct PublicClientDependencyTests {
 
 	@Test("external consumers can wire one Signal adapter")
 	func externalConsumersCanWireOneSignalAdapter() async throws {
-		let adapter = PublicSignalAdapter(existingJIDs: ["123:0@s.whatsapp.net"])
+		let adapter = PublicSignalAdapter(existingJIDs: ["123@s.whatsapp.net"])
 		let signalAdapter: any WhatsAppSignalAdapter = adapter
 		let dependencies = WhatsAppClientMessageDependencies(
 			signalAdapter: signalAdapter,

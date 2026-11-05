@@ -185,3 +185,9 @@ private enum RetryRequestReceiptBuilder {
 		]))
 	}
 }
+
+extension WhatsAppClient {
+	static func encodedSignedDeviceIdentity(_ account: SignedDeviceIdentityAccount) throws -> Data {
+		try RetryRequestReceiptBuilder.encodeSignedDeviceIdentity(account)
+	}
+}

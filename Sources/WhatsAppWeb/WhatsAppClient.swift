@@ -404,10 +404,10 @@ public actor WhatsAppClient {
 	}
 
 	public func handleIncomingNode(_ node: BinaryNode) async {
-		if node.tag == "iq" || node.tag == "ib" || node.tag == "failure" || node.tag == "stream:error" {
+		if node.tag == "iq" || node.tag == "ib" || node.tag == "failure" || node.tag == "stream:error" || (node.tag == "ack" && node.attrs["class"] == "message") {
 			let child: String
 			if case .nodes(let children)? = node.content { child = children.map(\.tag).joined(separator: ",") } else { child = "-" }
-			WhatsAppLog.logger.notice("node \(node.tag, privacy: .public) type=\(node.attrs["type"] ?? "-", privacy: .public) xmlns=\(node.attrs["xmlns"] ?? "-", privacy: .public) id=\(node.attrs["id"] ?? "-", privacy: .public) children=\(child, privacy: .public)")
+			WhatsAppLog.logger.notice("node \(node.tag, privacy: .public) type=\(node.attrs["type"] ?? "-", privacy: .public) xmlns=\(node.attrs["xmlns"] ?? "-", privacy: .public) id=\(node.attrs["id"] ?? "-", privacy: .public) error=\(node.attrs["error"] ?? "-", privacy: .public) children=\(child, privacy: .public)")
 		}
 		if await handleConnectionTerminationNode(node) {
 			return
@@ -563,8 +563,54 @@ public actor WhatsAppClient {
 			throw WhatsAppClientError.notConnected
 		}
 
+		var node = node
+		if node.tag == "message" {
+			node = withDeviceIdentityIfNeeded(node)
+			WhatsAppLog.logger.notice("stanza \(Self.describe(node), privacy: .public)")
+			WhatsAppLog.logger.notice("send message id=\(node.attrs["id"] ?? "-", privacy: .public) to=\(node.attrs["to"] ?? "-", privacy: .public) enc=\(Self.encTypes(in: node).joined(separator: ","), privacy: .public) identity=\(node.firstChild(named: "device-identity") != nil)")
+		}
 		let payload = try BinaryNodeEncoder().encode(node)
 		try await transport.send(encodeOutboundFrame(payload))
+	}
+
+	/// A message that opens a Signal session (`pkmsg`) must carry the account's signed device identity,
+	/// otherwise the recipient cannot verify the new session and the server drops the message.
+	private func withDeviceIdentityIfNeeded(_ node: BinaryNode) -> BinaryNode {
+		guard Self.encTypes(in: node).contains("pkmsg"),
+			  node.firstChild(named: "device-identity") == nil,
+			  let account = authenticationState?.credentials.account,
+			  let identity = try? Self.encodedSignedDeviceIdentity(account),
+			  case .nodes(let children)? = node.content else {
+			return node
+		}
+		return BinaryNode(
+			tag: node.tag,
+			attrs: node.attrs,
+			content: .nodes(children + [BinaryNode(tag: "device-identity", content: .data(identity))])
+		)
+	}
+
+	/// Structure of a node without payload bytes, for diagnosing rejected stanzas.
+	private static func describe(_ node: BinaryNode) -> String {
+		let attrs = node.attrs.map { "\($0.0)=\($0.1)" }.joined(separator: " ")
+		switch node.content {
+		case .nodes(let children)?:
+			return "<\(node.tag) \(attrs)>" + children.map(describe).joined() + "</\(node.tag)>"
+		case .data(let data)?:
+			return "<\(node.tag) \(attrs) bytes=\(data.count)/>"
+		case .string(let text)?:
+			return "<\(node.tag) \(attrs)>\(text)</\(node.tag)>"
+		case nil:
+			return "<\(node.tag) \(attrs)/>"
+		}
+	}
+
+	private static func encTypes(in node: BinaryNode) -> [String] {
+		guard case .nodes(let children)? = node.content else { return [] }
+		return children.flatMap { child -> [String] in
+			if child.tag == "enc" { return [child.attrs["type"] ?? "?"] }
+			return encTypes(in: child)
+		}
 	}
 
 	private func handleConnectionTerminationNode(_ node: BinaryNode) async -> Bool {
