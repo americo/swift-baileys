@@ -25,11 +25,13 @@ extension WhatsAppClient {
 				WhatsAppLog.logger.error("message not decrypted/parsed id=\(node.attrs["id"] ?? "?", privacy: .public) from=\(node.attrs["from"] ?? "?", privacy: .public)")
 				return false
 			}
+			let origin = messageOrigin(of: node)
 			let parsedMessage = ReceivedMessage(
 				id: messageID,
-				from: node.attrs["from"],
+				from: origin.chatJID,
 				timestamp: node.attrs["t"].flatMap(UInt64.init),
 				content: parsedContent,
+				fromMe: origin.fromMe,
 				participant: node.attrs["participant"],
 				messageSecret: ReceivedWebMessageInfoParser.secret(of: protoMessage)
 			)
@@ -157,6 +159,28 @@ extension WhatsAppClient {
 			}
 			return false
 		}
+	}
+
+	/// Resolves the chat and direction of an incoming message stanza.
+	///
+	/// A message sent by this account from another device arrives with `from` set to our own JID and the
+	/// real chat in `recipient`; in groups the sender is `participant`. Without this, those messages
+	/// look like they came from the contact.
+	private func messageOrigin(of node: BinaryNode) -> (chatJID: String?, fromMe: Bool) {
+		let from = node.attrs["from"]
+		let me = authenticationState?.credentials.me
+		func isMe(_ jid: String?) -> Bool {
+			guard let jid, !jid.isEmpty else { return false }
+			return JID.areSameUser(jid, me?.id) || JID.areSameUser(jid, me?.lid)
+		}
+
+		if let recipient = node.attrs["recipient"], !recipient.isEmpty, isMe(from) {
+			return (recipient, true)
+		}
+		if let from, from.hasSuffix("@g.us") || from.hasSuffix("@broadcast") {
+			return (from, isMe(node.attrs["participant"]))
+		}
+		return (from, false)
 	}
 
 	private func cleanedReceivedMessage(_ message: ReceivedMessage) -> ReceivedMessage {
