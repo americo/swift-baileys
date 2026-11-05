@@ -63,6 +63,17 @@ struct WhatsAppMediaDownloader: Sendable {
 		)
 	}
 
+	func download(url: URL, mediaKey: Data, mediaType: MediaType, fileEncSHA256: Data) async throws -> Data {
+		let encryptedFile = try await transport.download(from: url)
+		return try MediaDecryption.decrypt(
+			encryptedFile,
+			mediaKey: mediaKey,
+			mediaType: mediaType,
+			expectedFileEncSHA256: fileEncSHA256,
+			expectedFileSHA256: nil
+		)
+	}
+
 	func download(
 		_ request: MediaDownloadRequest,
 		reuploadRequest: @Sendable () async throws -> MediaDownloadRequest

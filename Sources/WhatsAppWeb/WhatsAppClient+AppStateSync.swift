@@ -503,6 +503,26 @@ extension WhatsAppClient {
 				)))
 			} else if action.hasLabelAssociationAction {
 				emitLabelAssociationUpdate(index: mutation.index, action: action.labelAssociationAction)
+			} else if action.hasStickerAction, mutation.index.count > 1 {
+				let sticker = action.stickerAction
+				eventContinuation.yield(.favoriteStickerUpdated(FavoriteStickerUpdate(
+					sticker: FavoriteSticker(
+						id: mutation.index[1],
+						url: sticker.url,
+						directPath: sticker.directPath,
+						mediaKey: sticker.mediaKey,
+						fileEncSHA256: sticker.fileEncSha256,
+						mimetype: sticker.mimetype,
+						width: sticker.width,
+						height: sticker.height,
+						fileLength: sticker.fileLength,
+						isFavorite: sticker.isFavorite,
+						isLottie: sticker.isLottie,
+						isAvatarSticker: sticker.isAvatarSticker,
+						timestamp: action.timestamp
+					),
+					removed: mutation.operation == .remove
+				)))
 			} else if action.hasPushNameSetting,
 					  action.pushNameSetting.hasName,
 					  authenticationState?.credentials.me?.name != action.pushNameSetting.name {

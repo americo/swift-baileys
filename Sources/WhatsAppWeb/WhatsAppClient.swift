@@ -68,6 +68,7 @@ public enum WhatsAppClientEvent: Equatable, Sendable {
 	case labelEdited(LabelUpdate)
 	case labelAssociationUpdated(LabelAssociationUpdate)
 	case settingsUpdated(SettingsUpdate)
+	case favoriteStickerUpdated(FavoriteStickerUpdate)
 	case newsletterReactionUpdated(NewsletterReactionUpdate)
 	case newsletterViewUpdated(NewsletterViewUpdate)
 	case newsletterParticipantsUpdated(NewsletterParticipantUpdate)

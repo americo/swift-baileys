@@ -5,6 +5,13 @@ typealias AppStatePatchKeyResolver = (String) async throws -> AppStatePatchKeySe
 struct AppStateDecodedMutation: Equatable, Sendable {
 	let syncAction: Proto_SyncActionData
 	let index: [String]
+	let operation: ChatModificationPatchOperation
+
+	init(syncAction: Proto_SyncActionData, index: [String], operation: ChatModificationPatchOperation = .set) {
+		self.syncAction = syncAction
+		self.index = index
+		self.operation = operation
+	}
 }
 
 struct AppStateMutationDecodeResult: Equatable, Sendable {
@@ -86,7 +93,7 @@ enum AppStateMutationDecoder {
 				throw AppStateMutationDecoderError.invalidIndexJSON
 			}
 
-			decoded.append(AppStateDecodedMutation(syncAction: syncAction, index: index))
+			decoded.append(AppStateDecodedMutation(syncAction: syncAction, index: index, operation: operation))
 			let indexKey = record.index.blob.base64EncodedString()
 			let previousValueMac = indexValueMap[indexKey]?.valueMac
 			if operation == .remove {
