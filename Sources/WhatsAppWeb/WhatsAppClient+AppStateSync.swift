@@ -161,6 +161,36 @@ extension WhatsAppClient {
 		return try await task.value
 	}
 
+	/// Accounts linked before the key id was recorded still hold the keys the phone shared.
+	/// Picks the most recent of them. Returns whether a key id is known afterwards.
+	@discardableResult
+	public func adoptStoredAppStateKey(ids: [String]) async throws -> Bool {
+		guard let authenticationState else {
+			throw WhatsAppClientError.missingAuthenticationState
+		}
+		if authenticationState.credentials.myAppStateKeyID != nil {
+			return true
+		}
+		let stored = try await authenticationState.keys.get(.appStateSyncKey, ids: ids)
+		var latest: (id: String, timestamp: Int64)?
+		for (id, data) in stored {
+			guard Data(base64Encoded: id) != nil,
+				  let key = try? Proto_Message.AppStateSyncKeyData(serializedBytes: data) else {
+				continue
+			}
+			if key.timestamp >= (latest?.timestamp ?? .min) {
+				latest = (id, key.timestamp)
+			}
+		}
+		guard let latest else {
+			return false
+		}
+		try await updateCredentials { credentials in
+			credentials.myAppStateKeyID = latest.id
+		}
+		return true
+	}
+
 	func requestAppStateSyncKeys(ids: [Data]) async throws {
 		guard !ids.isEmpty, let meJID = authenticationState?.credentials.me?.id else {
 			return
@@ -236,6 +266,11 @@ extension WhatsAppClient {
 				forceSnapshot: forceSnapshot && versions.isEmpty,
 				forceSnapshotCollections: forceSnapshotCollections
 			)
+			for node in result.firstChild(named: "sync")?.children(named: "collection") ?? [] {
+				let error = node.firstChild(named: "error")?.attrs["code"] ?? "-"
+				let children = node.children(named: "patches").count + node.children(named: "patch").count
+				WhatsAppLog.logger.notice("app state answer \(node.attrs["name"] ?? "?", privacy: .public) version=\(node.attrs["version"] ?? "-", privacy: .public) type=\(node.attrs["type"] ?? "-", privacy: .public) error=\(error, privacy: .public) snapshot=\(node.firstChild(named: "snapshot") != nil) patches=\(children)")
+			}
 			let extracted = try await AppStateSyncExtractor.extract(
 				from: result,
 				downloadExternalBlob: downloadExternalBlob
