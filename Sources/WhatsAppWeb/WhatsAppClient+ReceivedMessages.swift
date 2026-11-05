@@ -33,7 +33,8 @@ extension WhatsAppClient {
 				content: parsedContent,
 				fromMe: origin.fromMe,
 				participant: node.attrs["participant"],
-				messageSecret: ReceivedWebMessageInfoParser.secret(of: protoMessage)
+				messageSecret: ReceivedWebMessageInfoParser.secret(of: protoMessage),
+				textStyle: ReceivedWebMessageInfoParser.textStyle(of: protoMessage)
 			)
 			let receivedMessage = cleanedReceivedMessage(parsedMessage)
 			let content = receivedMessage.content

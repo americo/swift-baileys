@@ -46,6 +46,17 @@ enum ReceivedWebMessageInfoParser {
 		)
 	}
 
+	static func textStyle(of message: Proto_Message) -> ReceivedTextStyle? {
+		let normalized = MessageContentNormalizer.normalized(message)
+		guard normalized.hasExtendedTextMessage else { return nil }
+		let text = normalized.extendedTextMessage
+		guard text.hasBackgroundArgb || text.hasTextArgb else { return nil }
+		return ReceivedTextStyle(
+			backgroundARGB: text.hasBackgroundArgb ? text.backgroundArgb : nil,
+			textARGB: text.hasTextArgb ? text.textArgb : nil
+		)
+	}
+
 	static func secret(of message: Proto_Message) -> Data? {
 		guard message.hasMessageContextInfo else { return nil }
 		let secret = message.messageContextInfo.messageSecret

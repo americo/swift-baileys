@@ -1,5 +1,16 @@
 import Foundation
 
+/// How a text message is drawn: status updates carry a background and text colour.
+public struct ReceivedTextStyle: Equatable, Sendable {
+	public let backgroundARGB: UInt32?
+	public let textARGB: UInt32?
+
+	public init(backgroundARGB: UInt32?, textARGB: UInt32?) {
+		self.backgroundARGB = backgroundARGB
+		self.textARGB = textARGB
+	}
+}
+
 public struct ReceivedMessage: Equatable, Sendable {
 	public let id: String
 	public let from: String?
@@ -18,6 +29,8 @@ public struct ReceivedMessage: Equatable, Sendable {
 	public let reactions: [ReceivedReactionContent]
 	/// Starred on this account (`WebMessageInfo.starred`), as history sync delivers it.
 	public let starred: Bool
+	/// Background and text colour of an extended text message (set on text status updates).
+	public let textStyle: ReceivedTextStyle?
 
 	public init(
 		id: String,
@@ -32,7 +45,8 @@ public struct ReceivedMessage: Equatable, Sendable {
 		stub: ReceivedMessageStubContent? = nil,
 		messageSecret: Data? = nil,
 		reactions: [ReceivedReactionContent] = [],
-		starred: Bool = false
+		starred: Bool = false,
+		textStyle: ReceivedTextStyle? = nil
 	) {
 		self.id = id
 		self.from = from
@@ -47,6 +61,7 @@ public struct ReceivedMessage: Equatable, Sendable {
 		self.messageSecret = messageSecret
 		self.reactions = reactions
 		self.starred = starred
+		self.textStyle = textStyle
 	}
 }
 
