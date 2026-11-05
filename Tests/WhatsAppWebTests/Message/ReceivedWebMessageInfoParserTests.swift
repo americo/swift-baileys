@@ -34,6 +34,35 @@ struct ReceivedWebMessageInfoParserTests {
 		))
 	}
 
+	@Test("parses reactions stored on the message")
+	func parsesStoredReactions() throws {
+		var key = Proto_MessageKey()
+		key.remoteJid = "group@g.us"
+		key.id = "msg-1"
+		var authorKey = Proto_MessageKey()
+		authorKey.remoteJid = "group@g.us"
+		authorKey.fromMe = false
+		authorKey.id = "reaction-1"
+		authorKey.participant = "alice@s.whatsapp.net"
+		var reaction = Proto_Reaction()
+		reaction.key = authorKey
+		reaction.text = "❤️"
+		reaction.senderTimestampMs = 1_714_000_000_000
+		var info = Proto_WebMessageInfo()
+		info.key = key
+		info.message = MessageContentBuilder.text("hello")
+		info.reactions = [reaction]
+
+		let message = try #require(ReceivedWebMessageInfoParser.parse(info))
+
+		#expect(message.reactions == [ReceivedReactionContent(
+			key: ReceivedMessageKey(remoteJID: "group@g.us", fromMe: false, id: "reaction-1", participant: "alice@s.whatsapp.net"),
+			text: "❤️",
+			groupingKey: nil,
+			senderTimestampMilliseconds: 1_714_000_000_000
+		)])
+	}
+
 	@Test("parses stub-only system messages")
 	func parsesStubOnlySystemMessages() throws {
 		var key = Proto_MessageKey()
