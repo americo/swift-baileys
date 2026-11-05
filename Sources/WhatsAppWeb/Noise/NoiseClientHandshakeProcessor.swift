@@ -127,6 +127,11 @@ struct NoiseClientHandshakeProcessor: Sendable {
 		)
 	}
 
+	/// Encrypts the client payload sent in `ClientFinish` (after `processServerHello`).
+	mutating func encryptClientPayload(_ payload: Data) throws -> Data {
+		try handshakeState.encrypt(payload)
+	}
+
 	func makeTransportState() throws -> NoiseTransportState {
 		try handshakeState.makeTransportState()
 	}

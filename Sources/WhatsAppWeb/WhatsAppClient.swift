@@ -7,6 +7,8 @@ public struct WhatsAppClientConfiguration: Sendable {
 	public var webSocketURL: URL
 	public var historySyncPausedTimeout: Duration
 	public var shouldIgnoreJID: @Sendable (String) -> Bool?
+	/// WhatsApp Web version sent at login. `nil` resolves the latest published version at connect time.
+	public var version: WhatsAppVersion?
 
 	public init(
 		connectTimeout: Duration = .seconds(20),
@@ -14,7 +16,8 @@ public struct WhatsAppClientConfiguration: Sendable {
 		maxMessageRetryCount: Int = 5,
 		webSocketURL: URL = URL(string: "wss://web.whatsapp.com/ws/chat")!,
 		historySyncPausedTimeout: Duration = .seconds(120),
-		shouldIgnoreJID: @escaping @Sendable (String) -> Bool? = { _ in false }
+		shouldIgnoreJID: @escaping @Sendable (String) -> Bool? = { _ in false },
+		version: WhatsAppVersion? = nil
 	) {
 		self.connectTimeout = connectTimeout
 		self.companionPlatformID = companionPlatformID
@@ -22,6 +25,7 @@ public struct WhatsAppClientConfiguration: Sendable {
 		self.webSocketURL = webSocketURL
 		self.historySyncPausedTimeout = historySyncPausedTimeout
 		self.shouldIgnoreJID = shouldIgnoreJID
+		self.version = version
 	}
 }
 
@@ -110,6 +114,8 @@ public actor WhatsAppClient {
 	private var transport: (any WhatsAppWebSocketTransport)?
 	private var receiveTask: Task<Void, Never>?
 	var outboundFrameCodec = NoiseFrameCodec()
+	var noiseTransport: NoiseTransportState?
+	var keepAliveTask: Task<Void, Never>?
 	var callOfferCache: [String: WhatsAppCallEvent] = [:]
 	var recentSentMessages: [RecentSentMessageKey: RecentSentMessage] = [:]
 	var recentSentMessageOrder: [RecentSentMessageKey] = []
@@ -267,10 +273,46 @@ public actor WhatsAppClient {
 			state = .disconnected
 			throw error
 		}
+		guard let credentials = authenticationState?.credentials else {
+			await nextTransport.close()
+			state = .disconnected
+			throw WhatsAppClientError.missingAuthenticationState
+		}
+		let version: WhatsAppVersion
+		if let configured = configuration.version {
+			version = configured
+		} else {
+			version = await WhatsAppVersionResolver.fetchLatestWaWebVersion().version
+		}
+		let inboundCodec: NoiseFrameCodec
+		do {
+			let handshake = try await performNoiseHandshake(over: nextTransport, credentials: credentials, version: version)
+			noiseTransport = handshake.0
+			inboundCodec = handshake.1
+		} catch {
+			await nextTransport.close()
+			noiseTransport = nil
+			state = .disconnected
+			throw error
+		}
 		transport = nextTransport
 		state = .connected
 		await pruneExpiredTrustedContactTokens()
-		startReceiveLoop(transport: nextTransport)
+		startReceiveLoop(transport: nextTransport, codec: inboundCodec)
+	}
+
+	/// Encrypts (once the Noise handshake is done) and length-prefixes an outbound payload.
+	func encodeOutboundFrame(_ payload: Data) throws -> Data {
+		var data = payload
+		if noiseTransport != nil {
+			data = try noiseTransport!.encrypt(payload)
+		}
+		return outboundFrameCodec.encode(data)
+	}
+
+	func decryptInboundFrame(_ frame: Data) throws -> Data {
+		guard noiseTransport != nil else { return frame }
+		return try noiseTransport!.decrypt(frame)
 	}
 
 	public func configureMessageDependencies(_ dependencies: WhatsAppClientMessageDependencies) {
@@ -344,17 +386,34 @@ public actor WhatsAppClient {
 		}
 
 		let payload = try BinaryNodeEncoder().encode(node)
-		let frame = outboundFrameCodec.encode(payload)
+		let frame = try encodeOutboundFrame(payload)
+		WhatsAppLog.logger.notice("query -> \(node.tag, privacy: .public) xmlns=\(node.attrs["xmlns"] ?? "-", privacy: .public) type=\(node.attrs["type"] ?? "-", privacy: .public) id=\(id, privacy: .public) bytes=\(payload.count)")
 
-		let response = try await requestCoordinator.perform(id: id, timeout: timeout) {
-			try await transport.send(frame)
+		let response: BinaryNode
+		do {
+			response = try await requestCoordinator.perform(id: id, timeout: timeout) {
+				try await transport.send(frame)
+			}
+		} catch {
+			WhatsAppLog.logger.error("query failed id=\(id, privacy: .public) xmlns=\(node.attrs["xmlns"] ?? "-", privacy: .public): \(String(describing: error), privacy: .public)")
+			throw error
 		}
+		WhatsAppLog.logger.notice("query <- id=\(id, privacy: .public) type=\(response.attrs["type"] ?? "-", privacy: .public)")
 		try response.assertServerErrorFree()
 		return response
 	}
 
 	public func handleIncomingNode(_ node: BinaryNode) async {
+		if node.tag == "iq" || node.tag == "ib" || node.tag == "failure" || node.tag == "stream:error" {
+			let child: String
+			if case .nodes(let children)? = node.content { child = children.map(\.tag).joined(separator: ",") } else { child = "-" }
+			WhatsAppLog.logger.notice("node \(node.tag, privacy: .public) type=\(node.attrs["type"] ?? "-", privacy: .public) xmlns=\(node.attrs["xmlns"] ?? "-", privacy: .public) id=\(node.attrs["id"] ?? "-", privacy: .public) children=\(child, privacy: .public)")
+		}
 		if await handleConnectionTerminationNode(node) {
+			return
+		}
+
+		if await handleLoginSuccessNode(node) {
 			return
 		}
 
@@ -377,6 +436,10 @@ public actor WhatsAppClient {
 			}
 
 			if await handleNotificationNode(node) {
+				return
+			}
+
+			if await handleOfflineNode(node) {
 				return
 			}
 
@@ -441,16 +504,19 @@ public actor WhatsAppClient {
 		recentHistoryPausedTask = nil
 		await requestCoordinator.failAll(error: WhatsAppClientError.disconnected(reason: reason))
 		await mediaUpdateCoordinator.failAll(error: WhatsAppClientError.disconnected(reason: reason))
+		keepAliveTask?.cancel()
+		keepAliveTask = nil
+		noiseTransport = nil
 		await transport?.close()
 		transport = nil
 		state = .disconnected
 		eventContinuation.yield(.disconnected(reason: reason))
 	}
 
-	private func startReceiveLoop(transport: any WhatsAppWebSocketTransport) {
+	private func startReceiveLoop(transport: any WhatsAppWebSocketTransport, codec initialCodec: NoiseFrameCodec) {
 		receiveTask?.cancel()
 		receiveTask = Task {
-			var codec = NoiseFrameCodec()
+			var codec = initialCodec
 			let decoder = BinaryNodeDecoder()
 
 			while !Task.isCancelled {
@@ -461,7 +527,8 @@ public actor WhatsAppClient {
 					}
 
 					for frame in codec.decode(data) {
-						let node = try decoder.decode(frame)
+						let plain = try await self.decryptInboundFrame(frame)
+						let node = try decoder.decode(plain)
 						await handleIncomingNode(node)
 					}
 				} catch {
@@ -482,6 +549,9 @@ public actor WhatsAppClient {
 		recentHistoryPausedTask = nil
 		await requestCoordinator.failAll(error: WhatsAppClientError.disconnected(reason: reason))
 		await mediaUpdateCoordinator.failAll(error: WhatsAppClientError.disconnected(reason: reason))
+		keepAliveTask?.cancel()
+		keepAliveTask = nil
+		noiseTransport = nil
 		await transport?.close()
 		transport = nil
 		state = .disconnected
@@ -494,7 +564,7 @@ public actor WhatsAppClient {
 		}
 
 		let payload = try BinaryNodeEncoder().encode(node)
-		try await transport.send(outboundFrameCodec.encode(payload))
+		try await transport.send(encodeOutboundFrame(payload))
 	}
 
 	private func handleConnectionTerminationNode(_ node: BinaryNode) async -> Bool {

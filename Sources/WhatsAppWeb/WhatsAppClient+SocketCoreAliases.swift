@@ -9,7 +9,7 @@ extension WhatsAppClient {
 
 	public func sendRawMessage(_ data: Data) async throws {
 		try waitForSocketOpen()
-		try await sendRawFrame(outboundFrameCodec.encode(data))
+		try await sendRawFrame(encodeOutboundFrame(data))
 	}
 
 	public func waitForMessage(_ messageID: String, timeout: Duration = .seconds(60)) async throws -> BinaryNode? {

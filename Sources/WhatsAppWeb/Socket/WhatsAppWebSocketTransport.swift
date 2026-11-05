@@ -11,7 +11,9 @@ public struct URLSessionWebSocketTransport: WhatsAppWebSocketTransport {
 	private let task: URLSessionWebSocketTask
 
 	public init(url: URL, session: URLSession = .shared) {
-		self.task = session.webSocketTask(with: url)
+		var request = URLRequest(url: url)
+		request.setValue("https://web.whatsapp.com", forHTTPHeaderField: "Origin")
+		self.task = session.webSocketTask(with: request)
 	}
 
 	public func connect() async throws {
@@ -23,7 +25,13 @@ public struct URLSessionWebSocketTransport: WhatsAppWebSocketTransport {
 	}
 
 	public func receive() async throws -> Data? {
-		switch try await task.receive() {
+		let message: URLSessionWebSocketTask.Message
+		do {
+			message = try await task.receive()
+		} catch {
+			throw error
+		}
+		switch message {
 		case .data(let data):
 			return data
 		case .string(let string):
