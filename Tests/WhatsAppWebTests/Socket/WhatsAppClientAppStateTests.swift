@@ -29,7 +29,7 @@ struct WhatsAppClientAppStateTests {
 			try await client.pinChat("123@s.whatsapp.net", pinned: true, requestID: "app-state-1")
 		}
 		try await answerAppStateSync(transport)
-		let request = try await transport.waitForSentNode()
+		let request = try await transport.waitForSentNode(at: 1)
 		#expect(request.attrs["id"] == "app-state-1")
 		#expect(request.attrs["to"] == "@s.whatsapp.net")
 		#expect(request.attrs["type"] == "set")
@@ -69,7 +69,7 @@ struct WhatsAppClientAppStateTests {
 			try await client.pinChat("123@s.whatsapp.net", pinned: true, requestID: "app-state-native-1")
 		}
 		try await answerAppStateSync(transport)
-		let request = try await transport.waitForSentNode()
+		let request = try await transport.waitForSentNode(at: 1)
 		let collection = try #require(request.firstChild(named: "sync")?.firstChild(named: "collection"))
 		let patchData = try #require(collection.firstChild(named: "patch")?.contentData)
 		let patch = try Proto_SyncdPatch(serializedBytes: patchData)
@@ -110,7 +110,7 @@ struct WhatsAppClientAppStateTests {
 			try await client.pinChat("123@s.whatsapp.net", pinned: true, requestID: "rejected")
 		}
 		try await answerAppStateSync(transport)
-		_ = try await transport.waitForSentNode()
+		_ = try await transport.waitForSentNode(at: 1)
 		await transport.enqueueInbound(BinaryNode(
 			tag: "iq",
 			attrs: ["id": "rejected", "type": "result"],
@@ -339,7 +339,7 @@ private func expectPublicAppStateWrapperCollection(
 		try await operation(client)
 	}
 	try await answerAppStateSync(transport)
-	let request = try await transport.waitForSentNode()
+	let request = try await transport.waitForSentNode(at: 1)
 	let collection = try #require(request.firstChild(named: "sync")?.firstChild(named: "collection"))
 	#expect(request.attrs["id"] == requestID)
 	#expect(collection.attrs["name"] == expectedName)

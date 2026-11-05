@@ -50,7 +50,8 @@ struct SecretEncryptedEditCipher: Sendable {
 		)
 		for sender in Self.variants(of: originalSenderJID) {
 			for editor in Self.variants(of: editorJID) {
-				let aad = Data("\(originalMessageID)\u{0000}\(editor)".utf8)
+				// Polls and events authenticate the message id and the sender; other uses authenticate nothing.
+				let aads = [Data(), Data("\(originalMessageID)\u{0000}\(editor)".utf8)]
 				for label in Self.useCaseLabels {
 					let info = Data(originalMessageID.utf8) + Data(sender.utf8) + Data(editor.utf8) + Data(label.utf8)
 					let key = HKDF<SHA256>.deriveKey(
@@ -59,7 +60,7 @@ struct SecretEncryptedEditCipher: Sendable {
 						info: info,
 						outputByteCount: 32
 					)
-					guard let plaintext = try? AES.GCM.open(box, using: key, authenticating: aad) else { continue }
+					guard let plaintext = aads.lazy.compactMap({ try? AES.GCM.open(box, using: key, authenticating: $0) }).first else { continue }
 					let message = try Proto_Message(serializedBytes: plaintext)
 					let parsed = ReceivedMessageContentParser.parse(message)
 					if case .messageEdited(let edited)? = parsed { return edited.content }
