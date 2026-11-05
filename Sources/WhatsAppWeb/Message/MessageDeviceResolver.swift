@@ -86,10 +86,18 @@ public struct USyncMessageDeviceResolver: MessageDeviceResolving {
 
 		var devices: [String] = []
 		let users = response.firstChild(named: "usync")?.firstChild(named: "list")?.children(named: "user") ?? []
-		for user in users where user.attrs["jid"] == lookupJID {
-			guard let userJID = JID(user.attrs["jid"]) else {
+		// The server may answer under the phone-number JID while we asked about the LID (or the
+		// other way round); the `lid` child links the two.
+		let matching = users.filter { user in
+			user.attrs["jid"] == lookupJID || user.firstChild(named: "lid")?.attrs["val"] == lookupJID
+		}
+		let candidates = matching.isEmpty && users.count == 1 ? users : matching
+		for user in candidates {
+			guard let responseJID = JID(user.attrs["jid"]) else {
 				continue
 			}
+			// Keep addressing the contact the way the caller did, so Signal sessions line up.
+			let userJID = (responseJID.normalizedUser == lookupJID) ? responseJID : parsedJID
 
 			for device in user.firstChild(named: "devices")?.firstChild(named: "device-list")?.children(named: "device") ?? [] {
 				guard let idValue = device.attrs["id"], let id = Int(idValue) else {
@@ -111,6 +119,13 @@ public struct USyncMessageDeviceResolver: MessageDeviceResolving {
 			}
 		}
 
+		if devices.isEmpty {
+			let summary = users.map { user -> String in
+				let kids = (user.content.flatMap { c -> [BinaryNode]? in if case .nodes(let n) = c { return n } else { return nil } } ?? []).map(\.tag).joined(separator: "+")
+				return "jid=\(user.attrs["jid"] ?? "-") lid=\(user.firstChild(named: "lid")?.attrs["val"] ?? "-") children=\(kids)"
+			}.joined(separator: " | ")
+			WhatsAppLog.logger.error("usync returned no devices for \(lookupJID, privacy: .public): users=[\(summary, privacy: .public)]")
+		}
 		return devices
 	}
 }
