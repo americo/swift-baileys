@@ -33,7 +33,8 @@ enum ReceivedWebMessageInfoParser {
 			stub: stub,
 			messageSecret: info.hasMessage ? secret(of: info.message) : nil,
 			reactions: info.reactions.map(reaction),
-			starred: info.starred
+			starred: info.starred,
+			textStyle: info.hasMessage ? textStyle(of: info.message) : nil
 		)
 	}
 
