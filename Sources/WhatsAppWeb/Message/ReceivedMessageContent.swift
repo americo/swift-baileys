@@ -11,6 +11,8 @@ public struct ReceivedMessage: Equatable, Sendable {
 	public let status: ReceivedMessageStatus?
 	public let pushName: String?
 	public let stub: ReceivedMessageStubContent?
+	/// `messageContextInfo.messageSecret`: the key material for decrypting poll votes and event responses.
+	public let messageSecret: Data?
 
 	public init(
 		id: String,
@@ -22,7 +24,8 @@ public struct ReceivedMessage: Equatable, Sendable {
 		keyParticipant: String? = nil,
 		status: ReceivedMessageStatus? = nil,
 		pushName: String? = nil,
-		stub: ReceivedMessageStubContent? = nil
+		stub: ReceivedMessageStubContent? = nil,
+		messageSecret: Data? = nil
 	) {
 		self.id = id
 		self.from = from
@@ -34,6 +37,7 @@ public struct ReceivedMessage: Equatable, Sendable {
 		self.status = status
 		self.pushName = pushName
 		self.stub = stub
+		self.messageSecret = messageSecret
 	}
 }
 

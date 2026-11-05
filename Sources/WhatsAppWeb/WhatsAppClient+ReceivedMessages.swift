@@ -30,7 +30,8 @@ extension WhatsAppClient {
 				from: node.attrs["from"],
 				timestamp: node.attrs["t"].flatMap(UInt64.init),
 				content: parsedContent,
-				participant: node.attrs["participant"]
+				participant: node.attrs["participant"],
+				messageSecret: ReceivedWebMessageInfoParser.secret(of: protoMessage)
 			)
 			let receivedMessage = cleanedReceivedMessage(parsedMessage)
 			let content = receivedMessage.content

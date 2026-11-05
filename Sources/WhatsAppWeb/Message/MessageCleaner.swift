@@ -22,7 +22,8 @@ public enum MessageCleaner {
 			keyParticipant: cleanedKeyParticipant,
 			status: message.status,
 			pushName: message.pushName,
-			stub: message.stub
+			stub: message.stub,
+			messageSecret: message.messageSecret
 		)
 	}
 
