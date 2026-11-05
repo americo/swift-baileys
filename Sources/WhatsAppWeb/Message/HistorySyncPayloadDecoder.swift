@@ -16,6 +16,10 @@ enum HistorySyncPayloadDecoder {
 			throw HistorySyncPayloadDecoderError.decompressionFailed
 		}
 
+		// Apple's COMPRESSION_ZLIB is raw DEFLATE, while WhatsApp sends RFC 1950 zlib streams
+		// (2-byte header + trailing Adler-32), so the header has to be skipped first.
+		let data = stripZlibHeader(data)
+
 		var capacity = max(64, data.count * 4)
 		let maximumCapacity = 64 * 1024 * 1024
 
@@ -43,5 +47,13 @@ enum HistorySyncPayloadDecoder {
 		}
 
 		throw HistorySyncPayloadDecoderError.compressedPayloadTooLarge
+	}
+
+	private static func stripZlibHeader(_ data: Data) -> Data {
+		guard data.count > 2 else { return data }
+		let first = Int(data[data.startIndex])
+		let second = Int(data[data.startIndex + 1])
+		guard first & 0x0f == 8, (first << 8 | second) % 31 == 0 else { return data }
+		return data.dropFirst(2)
 	}
 }

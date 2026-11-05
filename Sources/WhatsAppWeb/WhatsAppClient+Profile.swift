@@ -48,7 +48,53 @@ public enum ReadReceiptsPrivacySettingValue: String, Sendable {
 	case none
 }
 
+public struct ProfilePictureInfo: Equatable, Sendable {
+	public let url: String
+	/// Changes whenever the contact sets a new picture, so it can be compared without downloading.
+	public let id: String?
+
+	public init(url: String, id: String?) {
+		self.url = url
+		self.id = id
+	}
+}
+
 extension WhatsAppClient {
+	public func profilePictureInfo(
+		for jid: String,
+		type: ProfilePictureType = .preview,
+		requestID: String? = nil
+	) async throws -> ProfilePictureInfo? {
+		let id = try requestID ?? messageIDGenerator.generateV2(userID: authenticationState?.credentials.me?.id)
+		let normalizedJID = JID(jid)?.normalizedUser ?? jid
+		var content = [
+			BinaryNode(tag: "picture", attrs: ["type": type.rawValue, "query": "url"])
+		]
+		let me = authenticationState?.credentials.me
+		let isSelf = JID.areSameUser(normalizedJID, me?.id) || JID.areSameUser(normalizedJID, me?.lid)
+		if serverProps.profilePicturePrivacyToken,
+		   !isSelf,
+		   let tokenNode = await TrustedContactTokenNodeBuilder.build(for: normalizedJID, keys: authenticationState?.keys) {
+			content.append(tokenNode)
+		}
+
+		let result = try await query(BinaryNode(
+			tag: "iq",
+			attrs: [
+				"id": id,
+				"target": normalizedJID,
+				"to": "@s.whatsapp.net",
+				"type": "get",
+				"xmlns": "w:profile:picture"
+			],
+			content: .nodes(content)
+		))
+		guard let picture = result.firstChild(named: "picture"), let url = picture.attrs["url"] else {
+			return nil
+		}
+		return ProfilePictureInfo(url: url, id: picture.attrs["id"])
+	}
+
 	public func profilePictureURL(
 		for jid: String,
 		type: ProfilePictureType = .preview,

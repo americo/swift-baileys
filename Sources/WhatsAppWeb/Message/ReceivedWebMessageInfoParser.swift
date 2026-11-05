@@ -1,3 +1,5 @@
+import Foundation
+
 enum ReceivedWebMessageInfoParser {
 	static func parse(_ info: Proto_WebMessageInfo) -> ReceivedMessage? {
 		guard info.hasKey, info.key.hasID else {
@@ -28,8 +30,15 @@ enum ReceivedWebMessageInfoParser {
 			keyParticipant: info.key.hasParticipant ? info.key.participant : nil,
 			status: info.hasStatus ? messageStatus(info.status) : nil,
 			pushName: info.hasPushName ? info.pushName : nil,
-			stub: stub
+			stub: stub,
+			messageSecret: info.hasMessage ? secret(of: info.message) : nil
 		)
+	}
+
+	static func secret(of message: Proto_Message) -> Data? {
+		guard message.hasMessageContextInfo else { return nil }
+		let secret = message.messageContextInfo.messageSecret
+		return secret.isEmpty ? nil : secret
 	}
 
 	private static func messageStatus(_ status: Proto_WebMessageInfo.Status) -> ReceivedMessageStatus {

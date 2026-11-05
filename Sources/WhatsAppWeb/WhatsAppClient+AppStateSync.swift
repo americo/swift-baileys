@@ -77,6 +77,16 @@ public extension WhatsAppClient {
 		return try await query(node)
 	}
 
+	/// Fetches app-state patches (contacts, pins, mutes, ...) and emits the resulting events.
+	/// Needs `configureAppStateDependencies` and the sync keys shared by the primary phone.
+	@discardableResult
+	public func resyncAppState(
+		collections: [AppStateCollectionName] = AppStateCollectionName.allCases,
+		forceSnapshot: Bool = false
+	) async throws -> AppStateSyncResult {
+		try await syncAppState(collections: collections, forceSnapshot: forceSnapshot)
+	}
+
 	func syncAppState(
 		collections: [AppStateCollectionName] = AppStateCollectionName.allCases,
 		forceSnapshot: Bool = false
