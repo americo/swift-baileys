@@ -379,7 +379,7 @@ struct WhatsAppClientAppStateSyncTests {
 
 		_ = try await task.value
 		#expect(await events.next() == .chatsUpdated([
-			ChatUpdate(id: "123@s.whatsapp.net", muteEndTime: 1_800_000_000)
+			ChatUpdate(id: "123@s.whatsapp.net", muteEndTime: 1_800_000_000, isMuted: true)
 		]))
 	}
 
@@ -420,7 +420,7 @@ struct WhatsAppClientAppStateSyncTests {
 
 		_ = try await task.value
 		#expect(await events.next() == .chatsUpdated([
-			ChatUpdate(id: "123@s.whatsapp.net", pinned: 0)
+			ChatUpdate(id: "123@s.whatsapp.net", pinned: 0, isPinned: true)
 		]))
 	}
 

@@ -126,6 +126,7 @@ public actor WhatsAppClient {
 	var serverProps = WhatsAppServerProps()
 	var inFlightTrustedContactTokenIssues: Set<String> = []
 	var blockedAppStateSyncCollections: Set<AppStateCollectionName> = []
+	var appStateWorkTail: Task<Void, Never>?
 	var appStateKeyExpander: (any AppStateKeyExpanding)?
 	var appStateHashMixer: (any AppStatePatchHashMixing)?
 	var appStateRandomBytes: (@Sendable (Int) throws -> Data)?
@@ -748,6 +749,7 @@ public enum WhatsAppClientError: Error, Equatable, Sendable {
 	case missingAppStateKeyID
 	case invalidAppStateKeyID
 	case missingAppStateSyncKey
+	case appStatePatchRejected(collection: String, code: String?)
 	case invalidBlocklistJID(String)
 	case missingLIDMappingForPN(String)
 	case missingPNMappingForLID(String)

@@ -41,6 +41,12 @@ public extension WhatsAppClient {
 
 		if !storedKeys.isEmpty {
 			try await authenticationState.keys.set([.appStateSyncKey: storedKeys])
+			// New patches are encrypted with the most recent key the phone shared.
+			if let latestKeyID = latestAppStateKeyID(in: share) {
+				try await updateCredentials { credentials in
+					credentials.myAppStateKeyID = latestKeyID
+				}
+			}
 			retryBlockedAppStateSyncCollections()
 		}
 	}
@@ -91,13 +97,13 @@ public extension WhatsAppClient {
 		collections: [AppStateCollectionName] = AppStateCollectionName.allCases,
 		forceSnapshot: Bool = false
 	) async throws -> AppStateSyncResult {
-		try await syncAppState(
-			collections: collections,
-			forceSnapshot: forceSnapshot,
-			downloadExternalBlob: { [mediaDownloader] reference in
-				try await mediaDownloader.download(appStateExternalBlobDownloadRequest(reference))
-			}
-		)
+		try await serializeAppStateWork { [self] in
+			try await syncAppState(
+				collections: collections,
+				forceSnapshot: forceSnapshot,
+				downloadExternalBlob: appStateExternalBlobDownloader()
+			)
+		}
 	}
 }
 
@@ -136,6 +142,50 @@ func appStateExternalBlobDownloadRequest(_ reference: Proto_ExternalBlobReferenc
 }
 
 extension WhatsAppClient {
+	func appStateExternalBlobDownloader() -> AppStateExternalBlobDownloader {
+		{ [mediaDownloader] reference in
+			try await mediaDownloader.download(appStateExternalBlobDownloadRequest(reference))
+		}
+	}
+
+	/// Syncs and patches both build on a collection's stored version, so they run one at a time.
+	func serializeAppStateWork<T: Sendable>(
+		_ work: @escaping @Sendable () async throws -> T
+	) async throws -> T {
+		let previous = appStateWorkTail
+		let task = Task<T, any Error> {
+			await previous?.value
+			return try await work()
+		}
+		appStateWorkTail = Task { _ = await task.result }
+		return try await task.value
+	}
+
+	private func latestAppStateKeyID(in share: ReceivedAppStateSyncKeyShareContent) -> String? {
+		var latest: (id: String, timestamp: Int64)?
+		for key in share.keys where key.keyData != nil {
+			guard let id = key.keyIDBase64 ?? key.keyID?.base64EncodedString() else {
+				continue
+			}
+			let timestamp = key.timestamp ?? 0
+			if timestamp >= (latest?.timestamp ?? .min) {
+				latest = (id, timestamp)
+			}
+		}
+		return latest?.id
+	}
+
+	/// Accounts linked before the key id was recorded only learn it from what the server sends.
+	private func rememberAppStateKeyIDIfMissing(_ keyID: Data?) async throws {
+		guard authenticationState?.credentials.myAppStateKeyID == nil,
+			  let keyID, !keyID.isEmpty else {
+			return
+		}
+		try await updateCredentials { credentials in
+			credentials.myAppStateKeyID = keyID.base64EncodedString()
+		}
+	}
+
 	func syncAppState(
 		collections: [AppStateCollectionName],
 		forceSnapshot: Bool,
@@ -182,7 +232,8 @@ extension WhatsAppClient {
 						)
 						state = decodedSnapshot.state
 						decodedMutationCount += decodedSnapshot.mutations.count
-						try await emitAppStateMutationEvents(decodedSnapshot.mutations)
+						try await emitAppStateMutationEvents(decodedSnapshot.mutations, fromSnapshot: true)
+						try await rememberAppStateKeyIDIfMissing(snapshot.keyID.id)
 						if !decodedSnapshot.snapshotMACValid {
 							invalidSnapshotMACCollections.append(collection.rawValue)
 						}
@@ -200,6 +251,7 @@ extension WhatsAppClient {
 						state = decodedPatch.state
 						decodedMutationCount += decodedPatch.mutations.count
 						try await emitAppStateMutationEvents(decodedPatch.mutations)
+						try await rememberAppStateKeyIDIfMissing(patch.keyID.id)
 					}
 				} catch {
 					let attempt = (attempts[collection] ?? 0) + 1
@@ -254,13 +306,22 @@ extension WhatsAppClient {
 		}
 	}
 
-	private func emitAppStateMutationEvents(_ mutations: [AppStateDecodedMutation]) async throws {
+	/// A snapshot holds the last action of every index, however old. Replaying a deletion or a
+	/// "read" from it could hit messages and unread counts that arrived after that action.
+	private func emitAppStateMutationEvents(
+		_ mutations: [AppStateDecodedMutation],
+		fromSnapshot: Bool = false
+	) async throws {
 		for mutation in mutations {
 			let action = mutation.syncAction.value
 			if action.hasMuteAction, mutation.index.count > 1 {
 				let mute = action.muteAction
 				eventContinuation.yield(.chatsUpdated([
-					ChatUpdate(id: mutation.index[1], muteEndTime: mute.muted ? mute.muteEndTimestamp : nil)
+					ChatUpdate(
+						id: mutation.index[1],
+						muteEndTime: mute.muted ? mute.muteEndTimestamp : nil,
+						isMuted: mute.muted
+					)
 				]))
 			} else if (action.hasArchiveChatAction || mutation.index.first == "archive" || mutation.index.first == "unarchive"),
 					  mutation.index.count > 1 {
@@ -271,15 +332,25 @@ extension WhatsAppClient {
 					)
 				]))
 			} else if action.hasMarkChatAsReadAction, mutation.index.count > 1 {
+				if fromSnapshot, action.markChatAsReadAction.read {
+					continue
+				}
 				eventContinuation.yield(.chatsUpdated([
 					ChatUpdate(id: mutation.index[1], unreadCount: action.markChatAsReadAction.read ? 0 : -1)
 				]))
 			} else if action.hasPinAction, mutation.index.count > 1 {
 				eventContinuation.yield(.chatsUpdated([
-					ChatUpdate(id: mutation.index[1], pinned: action.pinAction.pinned ? action.timestamp : nil)
+					ChatUpdate(
+						id: mutation.index[1],
+						pinned: action.pinAction.pinned ? action.timestamp : nil,
+						isPinned: action.pinAction.pinned
+					)
 				]))
 			} else if (action.hasDeleteMessageForMeAction || mutation.index.first == "deleteMessageForMe"),
 					  mutation.index.count > 3 {
+				if fromSnapshot {
+					continue
+				}
 				eventContinuation.yield(.messagesDeleted(MessageDeleteUpdate(keys: [
 					WhatsAppMessageKey(
 						remoteJID: mutation.index[1],
@@ -303,6 +374,9 @@ extension WhatsAppClient {
 				]))
 			} else if (action.hasDeleteChatAction || mutation.index.first == "deleteChat"),
 					  mutation.index.count > 1 {
+				if fromSnapshot {
+					continue
+				}
 				eventContinuation.yield(.chatsDeleted(ChatDeleteUpdate(ids: [mutation.index[1]])))
 			} else if action.hasContactAction, mutation.index.count > 1 {
 				let contact = action.contactAction

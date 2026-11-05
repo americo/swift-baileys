@@ -140,6 +140,7 @@ extension WhatsAppClient {
 		jid: String,
 		messageID: String,
 		fromMe: Bool,
+		participant: String? = nil,
 		starred: Bool,
 		requestID: String? = nil
 	) async throws {
@@ -147,6 +148,7 @@ extension WhatsAppClient {
 			jid: jid,
 			messageID: messageID,
 			fromMe: fromMe,
+			participant: participant,
 			starred: starred
 		), requestID: requestID)
 	}
@@ -185,6 +187,7 @@ extension WhatsAppClient {
 		jid: String,
 		messageID: String,
 		fromMe: Bool,
+		participant: String? = nil,
 		timestamp: Int64,
 		deleteMedia: Bool,
 		requestID: String? = nil
@@ -193,6 +196,7 @@ extension WhatsAppClient {
 			jid: jid,
 			messageID: messageID,
 			fromMe: fromMe,
+			participant: participant,
 			timestamp: timestamp,
 			deleteMedia: deleteMedia
 		), requestID: requestID)
@@ -319,13 +323,28 @@ extension WhatsAppClient {
 	}
 
 	func chatModify(_ modification: ChatModification, requestID: String? = nil) async throws {
-		_ = try await appPatch(
-			ChatModificationPatchBuilder.patch(for: modification),
-			requestID: requestID,
-			keyExpander: appStateKeyExpander ?? NativeAppStateKeyExpander(),
-			hashMixer: appStateHashMixer ?? NativeAppStatePatchHashMixer(),
-			randomBytes: appStateRandomBytes ?? MessageIDGenerator.secureRandomBytes(count:)
-		)
+		let patch = ChatModificationPatchBuilder.patch(for: modification)
+			.stamped(milliseconds: Int64(Date().timeIntervalSince1970 * 1000))
+		let keyExpander = appStateKeyExpander ?? NativeAppStateKeyExpander()
+		let hashMixer = appStateHashMixer ?? NativeAppStatePatchHashMixer()
+		let randomBytes = appStateRandomBytes ?? MessageIDGenerator.secureRandomBytes(count:)
+		try await serializeAppStateWork { [self] in
+			// A patch must build on the collection's latest version, or the server rejects it.
+			if let collection = AppStateCollectionName(rawValue: patch.type.rawValue) {
+				_ = try await syncAppState(
+					collections: [collection],
+					forceSnapshot: authenticationState?.credentials.myAppStateKeyID == nil,
+					downloadExternalBlob: appStateExternalBlobDownloader()
+				)
+			}
+			_ = try await appPatch(
+				patch,
+				requestID: requestID,
+				keyExpander: keyExpander,
+				hashMixer: hashMixer,
+				randomBytes: randomBytes
+			)
+		}
 	}
 
 	func appPatch(
@@ -369,7 +388,15 @@ extension WhatsAppClient {
 		)
 		let id = try requestID ?? messageIDGenerator.generateV2(userID: authenticationState.credentials.me?.id)
 		let node = try AppStatePatchNodeBuilder.syncIQ(for: patch.type, encodingResult: encodingResult, requestID: id)
-		_ = try await query(node)
+		let response = try await query(node)
+		// The stanza succeeds even when the collection refuses the patch.
+		if let collection = response.firstChild(named: "sync")?.firstChild(named: "collection"),
+		   collection.attrs["type"] == "error" {
+			throw WhatsAppClientError.appStatePatchRejected(
+				collection: patch.type.rawValue,
+				code: collection.firstChild(named: "error")?.attrs["code"]
+			)
+		}
 		try await authenticationState.keys.set([
 			.appStateSyncVersion: [patch.type.rawValue: try JSONEncoder().encode(encodingResult.state)]
 		])

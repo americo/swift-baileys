@@ -28,6 +28,7 @@ struct WhatsAppClientAppStateTests {
 		let task = Task {
 			try await client.pinChat("123@s.whatsapp.net", pinned: true, requestID: "app-state-1")
 		}
+		try await answerAppStateSync(transport)
 		let request = try await transport.waitForSentNode()
 		#expect(request.attrs["id"] == "app-state-1")
 		#expect(request.attrs["to"] == "@s.whatsapp.net")
@@ -67,6 +68,7 @@ struct WhatsAppClientAppStateTests {
 		let task = Task {
 			try await client.pinChat("123@s.whatsapp.net", pinned: true, requestID: "app-state-native-1")
 		}
+		try await answerAppStateSync(transport)
 		let request = try await transport.waitForSentNode()
 		let collection = try #require(request.firstChild(named: "sync")?.firstChild(named: "collection"))
 		let patchData = try #require(collection.firstChild(named: "patch")?.contentData)
@@ -81,6 +83,77 @@ struct WhatsAppClientAppStateTests {
 		let storedState = try JSONDecoder().decode(AppStatePatchState.self, from: try #require(stored["regular_low"]))
 		#expect(storedState.version == 1)
 		#expect(storedState.hash != Data(repeating: 0, count: 128))
+	}
+
+	@Test("a rejected patch throws and keeps the stored collection state")
+	func rejectedPatchThrowsAndKeepsTheStoredCollectionState() async throws {
+		var appStateKeyData = Proto_Message.AppStateSyncKeyData()
+		appStateKeyData.keyData = Data([0xaa])
+		let initialState = AppStatePatchState(version: 4, hash: Data(repeating: 6, count: 128))
+		let keys = InMemorySignalKeyStore(storage: [
+			.appStateSyncKey: ["AQIDBAUGBwg=": try appStateKeyData.serializedData()],
+			.appStateSyncVersion: ["regular_low": try JSONEncoder().encode(initialState)]
+		])
+		let transport = MockProfileWebSocketTransport()
+		let client = WhatsAppClient(
+			authenticationState: AuthenticationState(credentials: appStateCredentials(), keys: keys),
+			transportFactory: { _ in transport }
+		)
+		await client.configureAppStateDependencies(
+			keyExpander: StubAppStateKeyExpander(keys: try fixtureKeys()),
+			hashMixer: StubAppStateHashMixer(result: Data(repeating: 9, count: 128)),
+			randomBytes: { _ in try Data(hexString: "202122232425262728292a2b2c2d2e2f") }
+		)
+		try await client.connect()
+
+		let task = Task {
+			try await client.pinChat("123@s.whatsapp.net", pinned: true, requestID: "rejected")
+		}
+		try await answerAppStateSync(transport)
+		_ = try await transport.waitForSentNode()
+		await transport.enqueueInbound(BinaryNode(
+			tag: "iq",
+			attrs: ["id": "rejected", "type": "result"],
+			content: .nodes([
+				BinaryNode(tag: "sync", content: .nodes([
+					BinaryNode(tag: "collection", attrs: ["name": "regular_low", "type": "error"], content: .nodes([
+						BinaryNode(tag: "error", attrs: ["code": "409"])
+					]))
+				]))
+			])
+		))
+
+		await #expect(throws: WhatsAppClientError.appStatePatchRejected(collection: "regular_low", code: "409")) {
+			try await task.value
+		}
+		let stored = try await keys.get(.appStateSyncVersion, ids: ["regular_low"])
+		let storedState = try JSONDecoder().decode(AppStatePatchState.self, from: try #require(stored["regular_low"]))
+		#expect(storedState.version == 4)
+	}
+
+	@Test("patches carry the moment they were made")
+	func patchesCarryTheMomentTheyWereMade() {
+		let patch = ChatModificationPatchBuilder
+			.patch(for: .pin(jid: "123@s.whatsapp.net", pinned: true))
+			.stamped(milliseconds: 1_800_000_000_123)
+		#expect(patch.syncAction.timestamp == 1_800_000_000_123)
+		#expect(patch.index == ["pin_v1", "123@s.whatsapp.net"])
+	}
+
+	@Test("message patches name the sender of a group message")
+	func messagePatchesNameTheSenderOfAGroupMessage() {
+		let star = ChatModificationPatchBuilder.patch(for: .star(
+			jid: "1@g.us", messageID: "M", fromMe: false, participant: "555:7@s.whatsapp.net", starred: true
+		))
+		#expect(star.index == ["star", "1@g.us", "M", "0", "555@s.whatsapp.net"])
+		let ownStar = ChatModificationPatchBuilder.patch(for: .star(
+			jid: "1@g.us", messageID: "M", fromMe: true, participant: "555@s.whatsapp.net", starred: true
+		))
+		#expect(ownStar.index == ["star", "1@g.us", "M", "1", "0"])
+		let delete = ChatModificationPatchBuilder.patch(for: .deleteForMe(
+			jid: "1@g.us", messageID: "M", fromMe: false, participant: "555@s.whatsapp.net", timestamp: 60, deleteMedia: false
+		))
+		#expect(delete.index == ["deleteMessageForMe", "1@g.us", "M", "0", "555@s.whatsapp.net"])
 	}
 
 	@Test("public app-state wrappers send the expected collection")
@@ -230,6 +303,16 @@ struct WhatsAppClientAppStateTests {
 	}
 }
 
+/// A patch first brings its collection up to date. Answers that sync with nothing new.
+private func answerAppStateSync(_ transport: MockProfileWebSocketTransport) async throws {
+	let sync = try await transport.waitForSentNode()
+	#expect(sync.firstChild(named: "sync")?.firstChild(named: "collection")?.firstChild(named: "patch") == nil)
+	await transport.enqueueInbound(BinaryNode(
+		tag: "iq",
+		attrs: ["id": try #require(sync.attrs["id"]), "type": "result"]
+	))
+}
+
 private func expectPublicAppStateWrapperCollection(
 	_ expectedName: String,
 	requestID: String,
@@ -255,6 +338,7 @@ private func expectPublicAppStateWrapperCollection(
 	let task = Task {
 		try await operation(client)
 	}
+	try await answerAppStateSync(transport)
 	let request = try await transport.waitForSentNode()
 	let collection = try #require(request.firstChild(named: "sync")?.firstChild(named: "collection"))
 	#expect(request.attrs["id"] == requestID)

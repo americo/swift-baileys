@@ -16,6 +16,8 @@ public struct ReceivedMessage: Equatable, Sendable {
 	/// Reactions stored on the message itself (`WebMessageInfo.reactions`), as history sync delivers them.
 	/// Each `key` identifies the reaction's author; the reacted-to message is this one.
 	public let reactions: [ReceivedReactionContent]
+	/// Starred on this account (`WebMessageInfo.starred`), as history sync delivers it.
+	public let starred: Bool
 
 	public init(
 		id: String,
@@ -29,7 +31,8 @@ public struct ReceivedMessage: Equatable, Sendable {
 		pushName: String? = nil,
 		stub: ReceivedMessageStubContent? = nil,
 		messageSecret: Data? = nil,
-		reactions: [ReceivedReactionContent] = []
+		reactions: [ReceivedReactionContent] = [],
+		starred: Bool = false
 	) {
 		self.id = id
 		self.from = from
@@ -43,6 +46,7 @@ public struct ReceivedMessage: Equatable, Sendable {
 		self.stub = stub
 		self.messageSecret = messageSecret
 		self.reactions = reactions
+		self.starred = starred
 	}
 }
 
