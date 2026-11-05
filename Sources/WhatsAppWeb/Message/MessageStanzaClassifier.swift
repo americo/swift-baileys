@@ -8,9 +8,15 @@ enum MessageStanzaClassifier {
 
 	/// Extra attributes for each `enc` node of the message.
 	static func encAttributes(for message: Proto_Message) -> [String: String] {
-		// A reaction the recipient cannot decrypt is dropped without asking for a retry.
-		if isReaction(message) { return ["decrypt-fail": "hide"] }
+		// These only change an existing message, so one the recipient cannot decrypt is
+		// dropped without asking for a retry.
+		if isReaction(message) || changesExistingMessage(message) { return ["decrypt-fail": "hide"] }
 		return mediaType(for: message).map { ["mediatype": $0] } ?? [:]
+	}
+
+	private static func changesExistingMessage(_ message: Proto_Message) -> Bool {
+		guard message.hasProtocolMessage else { return false }
+		return message.protocolMessage.type == .revoke || message.protocolMessage.type == .messageEdit
 	}
 
 	private static func isReaction(_ message: Proto_Message) -> Bool {
