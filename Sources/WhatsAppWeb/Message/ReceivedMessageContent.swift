@@ -13,6 +13,9 @@ public struct ReceivedMessage: Equatable, Sendable {
 	public let stub: ReceivedMessageStubContent?
 	/// `messageContextInfo.messageSecret`: the key material for decrypting poll votes and event responses.
 	public let messageSecret: Data?
+	/// Reactions stored on the message itself (`WebMessageInfo.reactions`), as history sync delivers them.
+	/// Each `key` identifies the reaction's author; the reacted-to message is this one.
+	public let reactions: [ReceivedReactionContent]
 
 	public init(
 		id: String,
@@ -25,7 +28,8 @@ public struct ReceivedMessage: Equatable, Sendable {
 		status: ReceivedMessageStatus? = nil,
 		pushName: String? = nil,
 		stub: ReceivedMessageStubContent? = nil,
-		messageSecret: Data? = nil
+		messageSecret: Data? = nil,
+		reactions: [ReceivedReactionContent] = []
 	) {
 		self.id = id
 		self.from = from
@@ -38,6 +42,7 @@ public struct ReceivedMessage: Equatable, Sendable {
 		self.pushName = pushName
 		self.stub = stub
 		self.messageSecret = messageSecret
+		self.reactions = reactions
 	}
 }
 

@@ -23,7 +23,8 @@ public enum MessageCleaner {
 			status: message.status,
 			pushName: message.pushName,
 			stub: message.stub,
-			messageSecret: message.messageSecret
+			messageSecret: message.messageSecret,
+			reactions: message.reactions
 		)
 	}
 

@@ -57,6 +57,10 @@ actor TimedRequestCoordinator<Value: Sendable> {
 		}
 	}
 
+	func isPending(id: String) -> Bool {
+		pending[id] != nil
+	}
+
 	@discardableResult
 	func resolve(id: String, value: Value) -> Bool {
 		guard let request = pending.removeValue(forKey: id) else {

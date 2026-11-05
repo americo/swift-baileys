@@ -31,7 +31,17 @@ enum ReceivedWebMessageInfoParser {
 			status: info.hasStatus ? messageStatus(info.status) : nil,
 			pushName: info.hasPushName ? info.pushName : nil,
 			stub: stub,
-			messageSecret: info.hasMessage ? secret(of: info.message) : nil
+			messageSecret: info.hasMessage ? secret(of: info.message) : nil,
+			reactions: info.reactions.map(reaction)
+		)
+	}
+
+	private static func reaction(_ reaction: Proto_Reaction) -> ReceivedReactionContent {
+		ReceivedReactionContent(
+			key: reaction.hasKey ? ReceivedMessageContentParser.messageKey(reaction.key) : nil,
+			text: reaction.hasText ? reaction.text : nil,
+			groupingKey: reaction.hasGroupingKey ? reaction.groupingKey : nil,
+			senderTimestampMilliseconds: reaction.hasSenderTimestampMs ? reaction.senderTimestampMs : nil
 		)
 	}
 

@@ -31,6 +31,15 @@ public actor IQRequestCoordinator {
 		try await coordinator.waitForResponse(id: id, timeout: timeout)
 	}
 
+	/// Whether this node answers a request in flight.
+	public func isAwaiting(_ node: BinaryNode) async -> Bool {
+		guard let id = node.attrs["id"] else {
+			return false
+		}
+
+		return await coordinator.isPending(id: id)
+	}
+
 	public func receive(_ node: BinaryNode) async {
 		_ = await resolve(node)
 	}
