@@ -87,6 +87,7 @@ enum ChatModification: Equatable, Sendable {
 	case labelEdit(id: String, name: String?, color: Int32?, predefinedID: Int32?, deleted: Bool?)
 	case chatLabel(jid: String, labelID: String, labeled: Bool)
 	case messageLabel(jid: String, messageID: String, labelID: String, labeled: Bool)
+	case favoriteSticker(FavoriteSticker)
 }
 
 enum ChatModificationPatchBuilder {
@@ -306,6 +307,26 @@ enum ChatModificationPatchBuilder {
 				index: ["label_jid", labelID, jid],
 				type: .regular,
 				apiVersion: 3,
+				operation: .set
+			)
+		case .favoriteSticker(let sticker):
+			var value = Proto_SyncActionValue.StickerAction()
+			value.url = sticker.url
+			value.directPath = sticker.directPath
+			value.mediaKey = sticker.mediaKey
+			value.fileEncSha256 = sticker.fileEncSHA256
+			value.mimetype = sticker.mimetype
+			value.width = sticker.width
+			value.height = sticker.height
+			value.fileLength = sticker.fileLength
+			value.isFavorite = sticker.isFavorite
+			var action = Proto_SyncActionValue()
+			action.stickerAction = value
+			return ChatModificationPatch(
+				syncAction: action,
+				index: ["sticker", sticker.id],
+				type: .regularLow,
+				apiVersion: 2,
 				operation: .set
 			)
 		case .messageLabel(let jid, let messageID, let labelID, let labeled):

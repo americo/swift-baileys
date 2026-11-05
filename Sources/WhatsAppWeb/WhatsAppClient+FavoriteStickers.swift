@@ -1,6 +1,12 @@
 import Foundation
 
 extension WhatsAppClient {
+	/// Adds the sticker to the user's favourites (or removes it when `sticker.isFavorite` is false)
+	/// and shares the change with the phone and the other linked devices.
+	public func saveSticker(_ sticker: FavoriteSticker) async throws {
+		try await chatModify(.favoriteSticker(sticker))
+	}
+
 	/// Downloads and decrypts a favourite sticker. The sync action carries no plaintext hash, so only
 	/// the encrypted file hash and the MAC are verified.
 	public func downloadFavoriteSticker(_ sticker: FavoriteSticker) async throws -> Data {
