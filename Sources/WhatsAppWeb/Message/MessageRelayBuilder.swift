@@ -156,13 +156,14 @@ struct MessageRelayBuilder: Sendable {
 			encodedMessage: encodedMessage,
 			encodedDeviceSentMessage: encodedDeviceSentMessage,
 			localJID: localJID,
-			localLID: localLID
+			localLID: localLID,
+			extraAttributes: MessageStanzaClassifier.encAttributes(for: message)
 		)
 
 		var attrs = [
 			("id", messageID),
 			("to", destinationJID),
-			("type", "text")
+			("type", MessageStanzaClassifier.stanzaType(for: message))
 		]
 		// One-to-one stanzas carry no `phash` (that attribute is for groups); the server rejects
 		// them with SMAX_INVALID (479) when it is present.
@@ -233,11 +234,13 @@ struct MessageRelayBuilder: Sendable {
 			throw MessageRelayBuilderError.emptyGroupCiphertext
 		}
 		var contentNodes: [BinaryNode] = []
+		let encAttributes = MessageStanzaClassifier.encAttributes(for: message)
 		let participantNodes = try await senderKeyParticipantNodes(
 			groupJID: groupJID,
 			senderKeyDistributionMessage: encrypted.senderKeyDistributionMessage,
 			recipientDeviceJIDs: senderKeyRecipientDeviceJIDs,
-			localJID: senderJID
+			localJID: senderJID,
+			extraAttributes: encAttributes
 		)
 		if !participantNodes.isEmpty {
 			contentNodes.append(BinaryNode(tag: "participants", content: .nodes(participantNodes)))
@@ -246,7 +249,7 @@ struct MessageRelayBuilder: Sendable {
 		contentNodes.append(contentsOf: additionalNodes)
 		contentNodes.append(BinaryNode(
 			tag: "enc",
-			attrs: ["v": "2", "type": "skmsg"],
+			attrs: BinaryNodeAttributes([("v", "2"), ("type", "skmsg")] + encAttributes.map { ($0.key, $0.value) }),
 			content: .data(encrypted.ciphertext)
 		))
 		if MessageReportingTokenBuilder.shouldIncludeReportingToken(message),
@@ -261,7 +264,7 @@ struct MessageRelayBuilder: Sendable {
 		var attrs = [
 			("id", messageID),
 			("to", groupJID),
-			("type", "text")
+			("type", MessageStanzaClassifier.stanzaType(for: message))
 		]
 		for (key, value) in additionalAttributes {
 			attrs.append((key, value))
@@ -292,7 +295,7 @@ struct MessageRelayBuilder: Sendable {
 		}
 		var attrs: [(String, String)] = [
 			("id", messageID),
-			("type", "text")
+			("type", MessageStanzaClassifier.stanzaType(for: message))
 		]
 		for (key, value) in additionalAttributes {
 			attrs.append((key, value))
@@ -311,7 +314,10 @@ struct MessageRelayBuilder: Sendable {
 		let contentNodes = [
 			BinaryNode(
 				tag: "enc",
-				attrs: ["v": "2", "type": encrypted.type, "count": String(retryCount)],
+				attrs: BinaryNodeAttributes(
+					[("v", "2"), ("type", encrypted.type), ("count", String(retryCount))]
+						+ MessageStanzaClassifier.encAttributes(for: message).map { ($0.key, $0.value) }
+				),
 				content: .data(encrypted.ciphertext)
 			)
 		] + additionalNodes
@@ -327,7 +333,8 @@ struct MessageRelayBuilder: Sendable {
 		groupJID: String,
 		senderKeyDistributionMessage: Data,
 		recipientDeviceJIDs: [String],
-		localJID: String
+		localJID: String,
+		extraAttributes: [String: String]
 	) async throws -> [BinaryNode] {
 		guard !recipientDeviceJIDs.isEmpty else {
 			return []
@@ -359,7 +366,9 @@ struct MessageRelayBuilder: Sendable {
 				content: .nodes([
 					BinaryNode(
 						tag: "enc",
-						attrs: ["v": "2", "type": encrypted.type],
+						attrs: BinaryNodeAttributes(
+							[("v", "2"), ("type", encrypted.type)] + extraAttributes.map { ($0.key, $0.value) }
+						),
 						content: .data(encrypted.ciphertext)
 					)
 				])
