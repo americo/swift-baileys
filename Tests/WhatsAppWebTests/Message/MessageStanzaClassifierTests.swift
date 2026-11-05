@@ -48,6 +48,17 @@ struct MessageStanzaClassifierTests {
 		#expect(enc?.attrs["mediatype"] == nil)
 	}
 
+	@Test("deleting for everyone stays a text stanza that hides decryption failures")
+	func revokeStanza() async throws {
+		let message = MessageContentBuilder.delete(target: WhatsAppMessageKey(
+			remoteJID: "123@s.whatsapp.net", fromMe: true, id: "TARGET", participant: nil
+		))
+		let result = try await stanza(for: message)
+		let enc = result.firstChild(named: "participants")?.firstChild(named: "to")?.firstChild(named: "enc")
+		#expect(result.attrs["type"] == "text")
+		#expect(enc?.attrs["decrypt-fail"] == "hide")
+	}
+
 	@Test("media travels as a media stanza naming its type", arguments: [
 		("image", { var m = Proto_Message(); m.imageMessage = .init(); return m }() as Proto_Message),
 		("document", { var m = Proto_Message(); m.documentMessage = .init(); return m }() as Proto_Message),

@@ -508,7 +508,7 @@ extension WhatsAppClient {
 		additionalNodes: [BinaryNode] = [],
 		useUserDevicesCache: Bool = true
 	) async throws -> String {
-		if destinationJID.isGroupJID && additionalAttributes["edit"] == nil {
+		if destinationJID.isGroupJID {
 			return try await sendGroupMessage(
 				to: destinationJID,
 				message: message,
