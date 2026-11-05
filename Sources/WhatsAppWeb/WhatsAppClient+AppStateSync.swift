@@ -161,6 +161,31 @@ extension WhatsAppClient {
 		return try await task.value
 	}
 
+	func requestAppStateSyncKeys(ids: [Data]) async throws {
+		guard !ids.isEmpty, let meJID = authenticationState?.credentials.me?.id else {
+			return
+		}
+		var request = Proto_Message.AppStateSyncKeyRequest()
+		request.keyIds = ids.map { id in
+			var keyID = Proto_Message.AppStateSyncKeyId()
+			keyID.keyID = id
+			return keyID
+		}
+		var protocolMessage = Proto_Message.ProtocolMessageMessage()
+		protocolMessage.appStateSyncKeyRequest = request
+		protocolMessage.type = .appStateSyncKeyRequest
+		var message = Proto_Message()
+		message.protocolMessage = protocolMessage
+		_ = try await sendResolvedMessage(
+			to: JID(meJID)?.normalizedUser ?? meJID,
+			message: message,
+			messageID: nil,
+			additionalAttributes: ["category": "peer", "push_priority": "high_force"],
+			additionalNodes: [BinaryNode(tag: "meta", attrs: ["appdata": "default"])]
+		)
+		WhatsAppLog.logger.notice("app state keys requested count=\(ids.count)")
+	}
+
 	private func latestAppStateKeyID(in share: ReceivedAppStateSyncKeyShareContent) -> String? {
 		var latest: (id: String, timestamp: Int64)?
 		for key in share.keys where key.keyData != nil {
@@ -202,6 +227,7 @@ extension WhatsAppClient {
 		var invalidSnapshotMACCollections: [String] = []
 		var attempts: [AppStateCollectionName: Int] = [:]
 		var forceSnapshotCollections = Set<AppStateCollectionName>()
+		var missingKeyIDs = Set<String>()
 
 		while !pending.isEmpty {
 			let requestedCollections = collections.filter { pending.contains($0) }
@@ -254,6 +280,10 @@ extension WhatsAppClient {
 						try await rememberAppStateKeyIDIfMissing(patch.keyID.id)
 					}
 				} catch {
+					WhatsAppLog.logger.error("app state \(collection.rawValue, privacy: .public) failed: \(String(describing: error), privacy: .public)")
+					if let keyID = AppStateSyncErrorPolicy.missingKeyID(error) {
+						missingKeyIDs.insert(keyID)
+					}
 					let attempt = (attempts[collection] ?? 0) + 1
 					attempts[collection] = attempt
 					if AppStateSyncErrorPolicy.isMissingKey(error) {
@@ -283,6 +313,15 @@ extension WhatsAppClient {
 				if !syncCollection.hasMorePatches {
 					pending.remove(collection)
 				}
+			}
+		}
+
+		if !missingKeyIDs.isEmpty {
+			// The share sent while linking can be lost. The phone's answer resumes blocked collections.
+			do {
+				try await requestAppStateSyncKeys(ids: missingKeyIDs.compactMap { Data(base64Encoded: $0) })
+			} catch {
+				WhatsAppLog.logger.error("app state key request failed: \(String(describing: error), privacy: .public)")
 			}
 		}
 
