@@ -165,15 +165,33 @@ struct SignalIncomingMessageDecryptor: IncomingMessageDecrypting {
 			return message
 		}
 
-		guard let encryptedNode = node.firstChild(named: "enc"),
-			  let ciphertext = encryptedNode.dataContent,
-			  let type = encryptedNode.attrs["type"] else {
-			return nil
+		// A stanza can carry several `enc` children: a `pkmsg` with only the sender key distribution,
+		// then the `skmsg` with the content. Process them in order and keep the first with content.
+		var fallback: Proto_Message?
+		for encryptedNode in node.children(named: "enc") {
+			guard let ciphertext = encryptedNode.dataContent,
+				  let type = encryptedNode.attrs["type"] else {
+				continue
+			}
+			guard !ciphertext.isEmpty else {
+				throw SignalIncomingMessageDecryptorError.emptyCiphertext
+			}
+			guard let message = try await decryptEncryptedNode(type: type, ciphertext: ciphertext, node: node, authorJID: authorJID, groupJID: groupJID) else {
+				continue
+			}
+			if ReceivedMessageContentParser.parse(message) != nil { return message }
+			fallback = message
 		}
-		guard !ciphertext.isEmpty else {
-			throw SignalIncomingMessageDecryptorError.emptyCiphertext
-		}
+		return fallback
+	}
 
+	private func decryptEncryptedNode(
+		type: String,
+		ciphertext: Data,
+		node: BinaryNode,
+		authorJID: String?,
+		groupJID: String?
+	) async throws -> Proto_Message? {
 		let decrypted: Data
 		if type == "skmsg" {
 			guard let group = node.attrs["from"], let authorJID = node.attrs["participant"] else {
