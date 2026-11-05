@@ -566,6 +566,7 @@ public actor WhatsAppClient {
 		var node = node
 		if node.tag == "message" {
 			node = withDeviceIdentityIfNeeded(node)
+			WhatsAppLog.logger.notice("stanza \(Self.describe(node), privacy: .public)")
 			WhatsAppLog.logger.notice("send message id=\(node.attrs["id"] ?? "-", privacy: .public) to=\(node.attrs["to"] ?? "-", privacy: .public) enc=\(Self.encTypes(in: node).joined(separator: ","), privacy: .public) identity=\(node.firstChild(named: "device-identity") != nil)")
 		}
 		let payload = try BinaryNodeEncoder().encode(node)
@@ -587,6 +588,21 @@ public actor WhatsAppClient {
 			attrs: node.attrs,
 			content: .nodes(children + [BinaryNode(tag: "device-identity", content: .data(identity))])
 		)
+	}
+
+	/// Structure of a node without payload bytes, for diagnosing rejected stanzas.
+	private static func describe(_ node: BinaryNode) -> String {
+		let attrs = node.attrs.map { "\($0.0)=\($0.1)" }.joined(separator: " ")
+		switch node.content {
+		case .nodes(let children)?:
+			return "<\(node.tag) \(attrs)>" + children.map(describe).joined() + "</\(node.tag)>"
+		case .data(let data)?:
+			return "<\(node.tag) \(attrs) bytes=\(data.count)/>"
+		case .string(let text)?:
+			return "<\(node.tag) \(attrs)>\(text)</\(node.tag)>"
+		case nil:
+			return "<\(node.tag) \(attrs)/>"
+		}
 	}
 
 	private static func encTypes(in node: BinaryNode) -> [String] {
