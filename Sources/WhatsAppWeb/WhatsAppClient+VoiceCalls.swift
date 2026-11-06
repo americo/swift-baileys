@@ -6,6 +6,9 @@ public enum WhatsAppVoiceCallError: Error, Equatable, Sendable {
 	case missingOfferKey
 	case undecryptableOffer
 	case missingCallKey
+	case missingOwnLID
+	case peerLIDUnknown(String)
+	case missingRelay
 }
 
 /// An outgoing voice call whose `<offer>` was accepted by the server.
@@ -44,15 +47,19 @@ extension WhatsAppClient {
 	/// sends the `<offer>`, waiting for the server's ack.
 	///
 	/// This only performs the signaling half of a call. Media (relay, SRTP, audio) is separate.
-	public func startVoiceCall(to peer: String) async throws -> WhatsAppOutgoingVoiceCall {
+	public func startVoiceCall(to requestedPeer: String) async throws -> WhatsAppOutgoingVoiceCall {
 		guard let me = authenticationState?.credentials.me else {
 			throw WhatsAppClientError.missingAuthenticatedUser
 		}
 		guard let messageEncryptor else {
 			throw WhatsAppClientError.missingMessageEncryptor
 		}
+		// Media keys derive from LIDs on both sides, so a direct call needs ours and the peer's.
+		guard let callCreator = me.lid else {
+			throw WhatsAppVoiceCallError.missingOwnLID
+		}
 
-		let callCreator = me.lid ?? me.id
+		let peer = try await resolvePeerLID(requestedPeer)
 		let devices = try await getUSyncDevices([peer], useCache: false, ignoreZeroDevices: false).map(\.jid)
 		guard !devices.isEmpty else {
 			throw WhatsAppVoiceCallError.noDevices
@@ -182,7 +189,55 @@ extension WhatsAppClient {
 		callOfferNodes.removeValue(forKey: callID)
 	}
 
+	// MARK: Media session
+
+	/// Configuration for the media session of an outgoing call, taken from the offer ack.
+	public func mediaConfiguration(for call: WhatsAppOutgoingVoiceCall) throws -> CallSession.Configuration {
+		guard let relay = CallRelayData.parse(fromAck: call.offerAck) else {
+			throw WhatsAppVoiceCallError.missingRelay
+		}
+
+		return CallSession.Configuration(
+			callID: call.callID,
+			selfParticipantID: call.callCreator,
+			peerParticipantID: call.peer,
+			callKey: call.callKey,
+			relay: relay
+		)
+	}
+
+	/// Configuration for the media session of an incoming call, taken from the offer's relay block.
+	public func mediaConfiguration(for call: WhatsAppIncomingVoiceCall) throws -> CallSession.Configuration {
+		guard let selfID = authenticationState?.credentials.me?.lid else {
+			throw WhatsAppVoiceCallError.missingOwnLID
+		}
+		guard let relay = call.offer.firstChild(named: "relay").flatMap(CallRelayData.parse(relay:)) else {
+			throw WhatsAppVoiceCallError.missingRelay
+		}
+
+		return CallSession.Configuration(
+			callID: call.callID,
+			selfParticipantID: selfID,
+			peerParticipantID: call.callCreator,
+			callKey: call.callKey,
+			relay: relay
+		)
+	}
+
 	// MARK: Helpers
+
+	/// A phone-number JID mapped to its LID, or the JID unchanged when it already is one.
+	private func resolvePeerLID(_ peer: String) async throws -> String {
+		if peer.hasSuffix("@lid") {
+			return peer
+		}
+		guard let keys = authenticationState?.keys,
+			  let lid = try await LIDMappingStore.lid(for: peer, in: keys) else {
+			throw WhatsAppVoiceCallError.peerLIDUnknown(peer)
+		}
+
+		return lid.contains("@") ? lid : "\(lid)@lid"
+	}
 
 	private var localJIDs: Set<String> {
 		guard let me = authenticationState?.credentials.me else {
