@@ -22,4 +22,16 @@ extension WhatsAppClient {
 			messageID: messageID
 		)
 	}
+
+	public func sendNativeFlowReplyMessage(
+		to destinationJID: String,
+		content: OutgoingNativeFlowReplyContent,
+		messageID: String? = nil
+	) async throws -> String {
+		return try await sendResolvedMessage(
+			to: destinationJID,
+			message: MessageContentBuilder.nativeFlowReply(content),
+			messageID: messageID
+		)
+	}
 }

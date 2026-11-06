@@ -192,6 +192,21 @@ public struct OutgoingListReplyContent: Equatable, Sendable {
 	}
 }
 
+/// The answer to a native-flow button (`quick_reply`) or list (`single_select`) of an interactive message.
+public struct OutgoingNativeFlowReplyContent: Equatable, Sendable {
+	public let name: String
+	public let id: String
+	public let displayText: String
+	public let description: String?
+
+	public init(name: String, id: String, displayText: String, description: String? = nil) {
+		self.name = name
+		self.id = id
+		self.displayText = displayText
+		self.description = description
+	}
+}
+
 public struct OutgoingDisappearingMessagesContent: Equatable, Sendable {
 	public static let defaultExpirationSeconds: UInt32 = 604_800
 
