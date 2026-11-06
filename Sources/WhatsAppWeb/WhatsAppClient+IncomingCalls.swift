@@ -44,13 +44,28 @@ extension WhatsAppClient {
 			isVideo: status == .offer ? (infoChild.firstChild(named: "video") != nil) : cachedCall?.isVideo,
 			status: status,
 			offline: node.attrs["offline"] != nil,
-			latencyMs: callLatency(from: infoChild, status: status)
+			latencyMs: callLatency(from: infoChild, status: status),
+			senderJID: node.attrs["participant"] ?? chatID,
+			reason: infoChild.attrs["reason"]
 		)
 
 		if status == .offer {
 			callOfferCache[call.id] = call
-		} else if callShouldClearOffer(status) {
+			callOfferNodes[call.id] = node
+		} else if callShouldClearOffer(status), !call.isDeviceOnlyReject {
 			callOfferCache.removeValue(forKey: call.id)
+			callOfferNodes.removeValue(forKey: call.id)
+		}
+
+		if infoChild.tag == "offer", let stanzaID = node.attrs["id"], let creator = infoChild.attrs["call-creator"] {
+			let me = authenticationState?.credentials.me
+			try? await sendNode(CallStanzaBuilder.offerReceipt(
+				callID: callID,
+				to: chatID,
+				callCreator: creator,
+				stanzaID: stanzaID,
+				from: chatID.hasSuffix("@lid") ? me?.lid : me?.id
+			))
 		}
 
 		eventContinuation.yield(.call([call]))

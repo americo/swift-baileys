@@ -24,6 +24,10 @@ public struct WhatsAppCallEvent: Equatable, Sendable {
 	public let status: WhatsAppCallUpdateType
 	public let offline: Bool
 	public let latencyMs: Int?
+	/// The device that sent this stanza. An `accept` names the device that answered the call.
+	public let senderJID: String?
+	/// The stanza's `reason`, such as `busy` on a `reject`.
+	public let reason: String?
 
 	public init(
 		chatID: String,
@@ -36,7 +40,9 @@ public struct WhatsAppCallEvent: Equatable, Sendable {
 		isVideo: Bool? = nil,
 		status: WhatsAppCallUpdateType,
 		offline: Bool,
-		latencyMs: Int? = nil
+		latencyMs: Int? = nil,
+		senderJID: String? = nil,
+		reason: String? = nil
 	) {
 		self.chatID = chatID
 		self.from = from
@@ -49,5 +55,23 @@ public struct WhatsAppCallEvent: Equatable, Sendable {
 		self.status = status
 		self.offline = offline
 		self.latencyMs = latencyMs
+		self.senderJID = senderJID
+		self.reason = reason
 	}
+
+	/// A `reject` that speaks only for the device that sent it, so the call stays alive.
+	///
+	/// `busy`, `enc` and `uncallable` say that one device cannot take the call, and the others go on
+	/// ringing. Hosted devices of an account cannot take a voice call at all and turn down every offer
+	/// as soon as it arrives, so whatever they send decides nothing either.
+	public var isDeviceOnlyReject: Bool {
+		guard status == .reject else {
+			return false
+		}
+
+		return reason.map(Self.deviceOnlyRejectReasons.contains) == true
+			|| senderJID?.contains("@hosted") == true
+	}
+
+	private static let deviceOnlyRejectReasons: Set<String> = ["busy", "enc", "uncallable"]
 }
