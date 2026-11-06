@@ -462,6 +462,11 @@ extension WhatsAppClient {
 			[]
 		}
 		let relayAdditionalNodes = additionalNodes + tokenNodes
+		let fanOutDeviceJIDs = await directFanOutDeviceJIDs(
+			to: destinationJID,
+			recipientDeviceJIDs: recipientDeviceJIDs,
+			additionalAttributes: additionalAttributes
+		)
 		let stanza = try await MessageRelayBuilder(
 			encoder: messageEncoder,
 			encryptor: messageEncryptor
@@ -469,7 +474,7 @@ extension WhatsAppClient {
 			to: destinationJID,
 			messageID: resolvedMessageID,
 			message: message,
-			recipientDeviceJIDs: recipientDeviceJIDs,
+			recipientDeviceJIDs: fanOutDeviceJIDs,
 			localJID: authenticationState?.credentials.me?.id,
 			localLID: authenticationState?.credentials.me?.lid,
 			additionalAttributes: additionalAttributes,
@@ -483,6 +488,54 @@ extension WhatsAppClient {
 		)
 		cacheRecentSentMessage(destinationJID: destinationJID, id: resolvedMessageID, message: message)
 		return resolvedMessageID
+	}
+
+	/// Everyone who gets a ciphertext of a direct message: the destination's devices and our own,
+	/// except the device sending it.
+	func directFanOutDeviceJIDs(
+		to destinationJID: String,
+		recipientDeviceJIDs: [String],
+		additionalAttributes: [String: String]
+	) async -> [String] {
+		let me = authenticationState?.credentials.me
+		var devices = recipientDeviceJIDs
+		// Without a device of the destination the message reaches nobody; a copy for our own devices
+		// must not turn that into a send that looks successful.
+		if !recipientDeviceJIDs.isEmpty,
+		   additionalAttributes["category"] != "peer",
+		   !OwnDeviceAddressing.isOwnUser(destinationJID, localJID: me?.id, localLID: me?.lid) {
+			devices += await ownDeviceJIDsForFanOut(lidAddressed: destinationJID.isLIDUserJID || destinationJID.isHostedLIDUserJID)
+		}
+
+		return devices.filter { !OwnDeviceAddressing.isSendingDevice($0, localJID: me?.id, localLID: me?.lid) }
+	}
+
+	/// The account's other devices, which need their own ciphertext of everything this device sends:
+	/// without one the phone knows a message exists and shows "Waiting for this message".
+	/// Best effort, because failing to sync a copy must not stop the message reaching the recipient.
+	func ownDeviceJIDsForFanOut(lidAddressed: Bool) async -> [String] {
+		guard let me = authenticationState?.credentials.me,
+			  let messageDeviceResolver,
+			  let signalSessionPreparer else {
+			return []
+		}
+
+		// Address ourselves the way the conversation is addressed, as the Signal sessions are per address.
+		let ownJID = lidAddressed ? (me.lid ?? me.id) : me.id
+		guard let identity = JID(ownJID)?.normalizedUser else {
+			return []
+		}
+
+		do {
+			let devices = try await messageDeviceResolver.deviceJIDs(for: identity).filter {
+				!OwnDeviceAddressing.isSendingDevice($0, localJID: me.id, localLID: me.lid)
+			}
+			_ = try await signalSessionPreparer.assertSessions(for: devices, force: false)
+			return devices
+		} catch {
+			WhatsAppLog.logger.error("own devices unavailable for sender copy: \(String(describing: error), privacy: .public)")
+			return []
+		}
 	}
 
 	func uploadMedia(_ data: Data, mediaType: MediaType) async throws -> UploadedMedia {

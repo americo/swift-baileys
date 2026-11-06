@@ -34,7 +34,10 @@ extension WhatsAppClient {
 				throw WhatsAppClientError.missingMessageDeviceResolver
 			}
 
-			let recipientDeviceJIDs = try await messageDeviceResolver.deviceJIDs(for: request.requesterJID)
+			let me = authenticationState?.credentials.me
+			let recipientDeviceJIDs = try await messageDeviceResolver.deviceJIDs(for: request.requesterJID).filter {
+				!OwnDeviceAddressing.isSendingDevice($0, localJID: me?.id, localLID: me?.lid)
+			}
 			_ = try await signalSessionPreparer.assertSessions(for: recipientDeviceJIDs, force: true)
 			return try await resendCachedMessages(
 				destinationJID: destinationJID,
