@@ -9,6 +9,10 @@ public struct CallRTPHeader: Equatable, Sendable {
 	public static let opusPayloadType: UInt8 = 120
 	public static let rfc7587OpusPayloadType: UInt8 = 111
 
+	static func isAudioPayloadType(_ payloadType: UInt8) -> Bool {
+		payloadType == opusPayloadType || payloadType == rfc7587OpusPayloadType
+	}
+
 	public var marker: Bool
 	public var payloadType: UInt8
 	public var sequenceNumber: UInt16
@@ -205,51 +209,41 @@ public struct CallAudioPipeline {
 
 	/// Authenticates then decrypts one packet. State only advances for authenticated packets.
 	public mutating func unprotect(_ packet: Data) throws -> Received {
-		guard packet.count >= CallRTPHeader.fixedLength + tagLength,
-			  let header = CallRTPHeader.parse(packet),
-			  let headerLength = CallRTPHeader.length(of: packet) else {
-			throw ReceiveError.malformed
-		}
-
-		let split = packet.count - tagLength
-		guard split > headerLength else {
-			throw ReceiveError.malformed
-		}
-
-		let withoutTag = packet.prefix(split)
-		let received = packet.suffix(tagLength)
-		let stream = receiveStreams[header.ssrc] ?? ReceiveStream()
-		guard let roc = stream.estimateROC(for: header.sequenceNumber) else {
-			throw ReceiveError.malformed
-		}
-		guard CallMediaCrypto.verifyWarpTag(
-			authKey: receiveKeys.authKey,
-			packetWithoutTag: Data(withoutTag),
-			roc: roc,
-			receivedTag: Data(received)
-		) else {
-			throw ReceiveError.authenticationFailed
-		}
-
-		// Only now, with an authenticated packet, is it safe to track this SSRC.
-		guard receiveStreams[header.ssrc] != nil || receiveStreams.count < Self.maxReceiveStreams else {
-			throw ReceiveError.replayed
-		}
-
-		var updated = stream
-		guard updated.accept(sequence: header.sequenceNumber, roc: roc) else {
-			throw ReceiveError.replayed
-		}
-
-		receiveStreams[header.ssrc] = updated
-		var payload = try CallMediaCrypto.cryptPayload(
-			Data(withoutTag.dropFirst(headerLength)),
+		var (header, payload) = try CallSRTPReceive.unprotect(
+			packet,
 			keys: receiveKeys,
-			ssrc: header.ssrc,
-			roc: roc,
-			sequence: header.sequenceNumber
+			tagLength: tagLength,
+			streams: &receiveStreams,
+			maxStreams: Self.maxReceiveStreams
 		)
 		if packet[packet.startIndex] & 0x20 != 0, let padding = payload.last, Int(padding) <= payload.count {
+			payload.removeLast(Int(padding))
+		}
+
+		return Received(header: header, payload: payload)
+	}
+
+	/// Accepts an audio RTP packet that arrived inside an authenticated video packet, which is how a
+	/// WhatsApp client sends its speech in a video call. It has no tag of its own, but runs through
+	/// this stream's replay check like audio that arrives alone.
+	public mutating func acceptCarried(_ packet: Data) -> Received? {
+		guard let header = CallRTPHeader.parse(packet),
+			  CallRTPHeader.isAudioPayloadType(header.payloadType),
+			  let headerLength = CallRTPHeader.length(of: packet),
+			  packet.count > headerLength else {
+			return nil
+		}
+
+		var stream = receiveStreams[header.ssrc] ?? ReceiveStream()
+		guard receiveStreams[header.ssrc] != nil || receiveStreams.count < Self.maxReceiveStreams,
+			  let roc = stream.estimateROC(for: header.sequenceNumber),
+			  stream.accept(sequence: header.sequenceNumber, roc: roc) else {
+			return nil
+		}
+
+		receiveStreams[header.ssrc] = stream
+		var payload = Data(packet.dropFirst(headerLength))
+		if packet[packet.startIndex] & 0x20 != 0, let padding = payload.last, Int(padding) < payload.count {
 			payload.removeLast(Int(padding))
 		}
 

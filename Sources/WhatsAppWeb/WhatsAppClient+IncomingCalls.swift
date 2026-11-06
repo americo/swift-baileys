@@ -14,6 +14,13 @@ extension WhatsAppClient {
 			return true
 		}
 
+		// Every call stanza, since a hang-up that goes unnoticed leaves nothing else to go on.
+		let actions = node.allChildren.map { child in
+			let attrs = child.attrs.map { "\($0.0)=\($0.1)" }.sorted().joined(separator: ",")
+			return "\(child.tag)(\(attrs))"
+		}.joined(separator: "+")
+		WhatsAppLog.logger.notice("call stanza from=\(node.attrs["from"] ?? "-", privacy: .public) participant=\(node.attrs["participant"] ?? "-", privacy: .public) \(actions, privacy: .public)")
+
 		guard let chatID = node.attrs["from"], let infoChild = node.allChildren.first else {
 			if let ack = StanzaAck.build(for: node) {
 				try? await sendNode(ack)
@@ -46,7 +53,9 @@ extension WhatsAppClient {
 			offline: node.attrs["offline"] != nil,
 			latencyMs: callLatency(from: infoChild, status: status),
 			senderJID: node.attrs["participant"] ?? chatID,
-			reason: infoChild.attrs["reason"]
+			reason: infoChild.attrs["reason"],
+			videoState: status == .video ? infoChild.attrs["state"].flatMap(Int.init) : nil,
+			videoOrientation: callVideoOrientation(in: infoChild)
 		)
 
 		if status == .offer {
@@ -69,7 +78,8 @@ extension WhatsAppClient {
 		}
 
 		eventContinuation.yield(.call([call]))
-		if let ack = StanzaAck.build(for: node) {
+		// A mid-call `<video>` is acknowledged by type: the sender's request times out without it.
+		if let ack = StanzaAck.build(for: node, type: status == .video ? "video" : nil) {
 			try? await sendNode(ack)
 		}
 
@@ -85,6 +95,14 @@ private extension BinaryNode {
 
 		return children
 	}
+}
+
+/// The rotation a stanza announces, on the action itself or on its `<video>` child. Anything outside
+/// the four quarter turns is not announced at all, since zero is a real rotation.
+private func callVideoOrientation(in node: BinaryNode) -> Int? {
+	let raw = node.tag == "video" ? node.attrs["device_orientation"]
+		: node.firstChild(named: "video")?.attrs["device_orientation"]
+	return raw.flatMap(Int.init).flatMap { (0...3).contains($0) ? $0 : nil }
 }
 
 private func callIsGroup(_ node: BinaryNode) -> Bool {

@@ -10,6 +10,8 @@ public enum WhatsAppCallUpdateType: String, Sendable {
 	case reject
 	case accept
 	case terminate
+	/// A mid-call change of the peer's video, carried by `videoState`.
+	case video
 }
 
 public struct WhatsAppCallEvent: Equatable, Sendable {
@@ -28,6 +30,10 @@ public struct WhatsAppCallEvent: Equatable, Sendable {
 	public let senderJID: String?
 	/// The stanza's `reason`, such as `busy` on a `reject`.
 	public let reason: String?
+	/// The raw `state` of a `.video` update (`CallVideoState`, when it is one this client knows).
+	public let videoState: Int?
+	/// Quarter turns the sender's camera is rotated by, on stanzas that announce it.
+	public let videoOrientation: Int?
 
 	public init(
 		chatID: String,
@@ -42,7 +48,9 @@ public struct WhatsAppCallEvent: Equatable, Sendable {
 		offline: Bool,
 		latencyMs: Int? = nil,
 		senderJID: String? = nil,
-		reason: String? = nil
+		reason: String? = nil,
+		videoState: Int? = nil,
+		videoOrientation: Int? = nil
 	) {
 		self.chatID = chatID
 		self.from = from
@@ -57,6 +65,8 @@ public struct WhatsAppCallEvent: Equatable, Sendable {
 		self.latencyMs = latencyMs
 		self.senderJID = senderJID
 		self.reason = reason
+		self.videoState = videoState
+		self.videoOrientation = videoOrientation
 	}
 
 	/// A `reject` that speaks only for the device that sent it, so the call stays alive.

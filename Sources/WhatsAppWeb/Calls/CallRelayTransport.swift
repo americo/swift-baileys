@@ -111,6 +111,10 @@ public actor CallRelayTransport {
 		flush()
 	}
 
+	public func sendPressure() -> SCTPAssociation.SendPressure? {
+		isClosed ? nil : association.takeSendPressure()
+	}
+
 	public func close() {
 		guard !isClosed else {
 			return

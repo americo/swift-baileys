@@ -5,8 +5,11 @@ import Foundation
 public enum CallCapability {
 	public static let offer = Data([0x01, 0x05, 0xf7, 0x09, 0xe0, 0xbb, 0x13])
 	public static let preaccept = Data([0x01, 0x05, 0xf7, 0x09, 0xe0, 0xbb, 0x07])
+	/// What a video `<offer>` carries. A video callee's `<preaccept>` uses `offer` instead.
+	public static let videoOffer = Data([0x01, 0x05, 0xf7, 0x09, 0xe0, 0xbb, 0x53])
 	public static let standardOpusOffer = clearingMLow(offer)
 	public static let standardOpusPreaccept = clearingMLow(preaccept)
+	public static let standardOpusVideoOffer = clearingMLow(videoOffer)
 
 	/// Index of the MLow bit inside the mask that follows the two-byte `[version][length]` header.
 	static let mlowIndex = 31
@@ -33,6 +36,45 @@ public enum CallVoIPSettings {
 	)
 }
 
+/// `state` of a mid-call `<video>` stanza.
+public enum CallVideoState: Int, Equatable, Sendable {
+	case disabled = 0
+	case enabled = 1
+	case paused = 2
+	case upgradeRequest = 3
+	case upgradeAccept = 4
+	case upgradeReject = 5
+	case stopped = 6
+	case upgradeRejectByTimeout = 7
+	case upgradeCancel = 8
+	case upgradeCancelByTimeout = 9
+	case unknownPeer = 10
+	case upgradeRequestV2 = 11
+	case error = 20
+}
+
+/// Peer experiment metadata a video `<accept>` mirrors from the offer.
+public struct CallPeerMetadata: Equatable, Sendable {
+	public let abTestBucket: String?
+	public let abTestBucketIDList: String?
+
+	public init(abTestBucket: String?, abTestBucketIDList: String?) {
+		self.abTestBucket = abTestBucket
+		self.abTestBucketIDList = abTestBucketIDList
+	}
+
+	init?(offer: BinaryNode) {
+		guard let metadata = offer.firstChild(named: "metadata") else {
+			return nil
+		}
+
+		self.init(
+			abTestBucket: metadata.attrs["peer_abtest_bucket"],
+			abTestBucketIDList: metadata.attrs["peer_abtest_bucket_id_list"]
+		)
+	}
+}
+
 public struct CallOfferDeviceKey: Equatable, Sendable {
 	public let deviceJID: String
 	public let ciphertext: Data
@@ -46,7 +88,7 @@ public struct CallOfferDeviceKey: Equatable, Sendable {
 	}
 }
 
-/// Builders for the `<call>` stanzas of a 1:1 voice call. Child order matters: the server rejects
+/// Builders for the `<call>` stanzas of a 1:1 call. Child order matters: the server rejects
 /// out-of-order children, so each builder follows the order the official client sends.
 public enum CallStanzaBuilder {
 	/// One `<audio>` per offered rate. WhatsApp selects its audio path by this rate, and the 16 kHz
@@ -54,8 +96,17 @@ public enum CallStanzaBuilder {
 	public static let defaultAudioRates = ["16000"]
 	public static let rejectReasonBusy = "busy"
 	public static let terminateReasonAcceptedElsewhere = "accepted_elsewhere"
+	/// The decoder capabilities this client advertises. Only H.264: a callee that took a wider list at
+	/// its word could send something this client cannot decode.
+	public static let videoDecoders = "H264"
+	/// The encoder name WhatsApp's `<video>` reader accepts, spelled differently from `videoDecoders`
+	/// on purpose: an offer naming `h264` is delivered, acknowledged and never rings.
+	public static let videoEncoder = "h.264"
+	/// A rotation of zero: this client's camera is upright, and no call has rotated it yet.
+	public static let uprightOrientation = "0"
 
-	/// `<offer>`: privacy → audio… → net → capability → destination|enc → encopt → device-identity.
+	/// `<offer>`: privacy → audio… → [video] → net → capability → destination|enc → encopt →
+	/// device-identity.
 	public static func offer(
 		callID: String,
 		to: String,
@@ -66,13 +117,25 @@ public enum CallStanzaBuilder {
 		capability: Data = CallCapability.standardOpusOffer,
 		deviceIdentity: Data? = nil,
 		multiDevice: Bool = false,
-		audioRates: [String] = defaultAudioRates
+		audioRates: [String] = defaultAudioRates,
+		video: Bool = false
 	) -> BinaryNode {
 		var children = [BinaryNode]()
 		if let privacyToken {
 			children.append(BinaryNode(tag: "privacy", content: .data(privacyToken)))
 		}
 		children += audioRates.map(audioNode)
+		if video {
+			// A 1:1 offer carries no geometry: `1920x1080` is the group shape, and a callee given it
+			// answers without ever rendering the stream.
+			children.append(BinaryNode(tag: "video", attrs: BinaryNodeAttributes([
+				("enc", videoEncoder),
+				("dec", videoDecoders),
+				("screen_width", "0"),
+				("screen_height", "0"),
+				("device_orientation", uprightOrientation)
+			])))
+		}
 		children.append(BinaryNode(tag: "net", attrs: ["medium": "3"]))
 		children.append(capabilityNode(capability))
 
@@ -93,20 +156,33 @@ public enum CallStanzaBuilder {
 		return wrap(to: to, stanzaID: stanzaID, action: action("offer", callID, callCreator, children))
 	}
 
-	/// `<preaccept>`: audio… → encopt → capability. Sent by the callee while the user decides.
+	/// `<preaccept>`: audio… → [video] → encopt → capability. Sent by the callee while the user decides.
 	public static func preaccept(
 		callID: String,
 		to: String,
 		callCreator: String,
 		stanzaID: String,
-		capability: Data = CallCapability.standardOpusPreaccept,
-		audioRates: [String] = defaultAudioRates
+		capability: Data? = nil,
+		audioRates: [String] = defaultAudioRates,
+		video: Bool = false
 	) -> BinaryNode {
-		let children = audioRates.map(audioNode) + [encoptNode, capabilityNode(capability)]
+		var children = audioRates.map(audioNode)
+		if video {
+			children.append(BinaryNode(tag: "video", attrs: BinaryNodeAttributes([
+				("dec", videoDecoders),
+				("device_orientation", uprightOrientation),
+				("screen_width", "0"),
+				("screen_height", "0")
+			])))
+		}
+		let blob = capability ?? (video ? CallCapability.standardOpusOffer : CallCapability.standardOpusPreaccept)
+		children += [encoptNode, capabilityNode(blob)]
 		return wrap(to: to, stanzaID: stanzaID, action: action("preaccept", callID, callCreator, children))
 	}
 
-	/// `<accept>`: audio… → [te] → net → encopt → capability → [rte] → voip_settings.
+	/// `<accept>`: audio… → [video] → [te] → net → encopt → [metadata] → [capability] → [rte] →
+	/// voip_settings. An official video accept has no capability child, and mirrors the offer's
+	/// experiment metadata.
 	public static func accept(
 		callID: String,
 		to: String,
@@ -115,16 +191,32 @@ public enum CallStanzaBuilder {
 		relayTransportEndpoint: Data? = nil,
 		routingToken: Data? = nil,
 		voipSettings: Data? = CallVoIPSettings.standardOpus16kHzClock,
-		capability: Data = CallCapability.standardOpusOffer,
-		audioRates: [String] = defaultAudioRates
+		capability: Data? = CallCapability.standardOpusOffer,
+		audioRates: [String] = defaultAudioRates,
+		video: Bool = false,
+		peerMetadata: CallPeerMetadata? = nil
 	) -> BinaryNode {
 		var children = audioRates.map(audioNode)
+		if video {
+			children.append(BinaryNode(tag: "video", attrs: BinaryNodeAttributes([
+				("dec", videoDecoders),
+				("device_orientation", uprightOrientation)
+			])))
+		}
 		if let relayTransportEndpoint {
 			children.append(BinaryNode(tag: "te", attrs: ["priority": "2"], content: .data(relayTransportEndpoint)))
 		}
 		children.append(BinaryNode(tag: "net", attrs: ["medium": "2"]))
 		children.append(encoptNode)
-		children.append(capabilityNode(capability))
+		if let peerMetadata, peerMetadata.abTestBucket != nil || peerMetadata.abTestBucketIDList != nil {
+			children.append(BinaryNode(tag: "metadata", attrs: BinaryNodeAttributes.trimmingUndefined([
+				("peer_abtest_bucket", peerMetadata.abTestBucket),
+				("peer_abtest_bucket_id_list", peerMetadata.abTestBucketIDList)
+			])))
+		}
+		if let capability, !video {
+			children.append(capabilityNode(capability))
+		}
 		if let routingToken {
 			children.append(BinaryNode(tag: "rte", content: .data(routingToken)))
 		}
@@ -167,6 +259,29 @@ public enum CallStanzaBuilder {
 		}
 
 		return wrap(to: to, stanzaID: stanzaID, action: BinaryNode(tag: "terminate", attrs: attrs))
+	}
+
+	/// `<video>`: turns a direction of the call on or off, or negotiates upgrading a voice call.
+	public static func videoState(
+		callID: String,
+		to: String,
+		callCreator: String,
+		stanzaID: String,
+		state: CallVideoState,
+		decoders: String? = nil,
+		deviceOrientation: String? = nil
+	) -> BinaryNode {
+		wrap(to: to, stanzaID: stanzaID, action: BinaryNode(
+			tag: "video",
+			attrs: BinaryNodeAttributes.trimmingUndefined([
+				("call-id", callID),
+				("call-creator", callCreator),
+				("state", String(state.rawValue)),
+				("dec", decoders),
+				("voip_settings", state == .upgradeRequestV2 ? "video" : nil),
+				("device_orientation", deviceOrientation)
+			])
+		))
 	}
 
 	/// `<transport>`: the caller answers a callee's `<accept>` with it.
