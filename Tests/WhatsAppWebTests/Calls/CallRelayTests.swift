@@ -77,6 +77,16 @@ struct CallRelayTests {
 		#expect(CallRelayData.parse(fromAck: BinaryNode(tag: "ack")) == nil)
 	}
 
+	@Test("finds a relay nested deeper in a stanza")
+	func findsNestedRelay() {
+		let offer = BinaryNode(tag: "offer", content: .nodes([
+			BinaryNode(tag: "net"),
+			BinaryNode(tag: "media", content: .nodes([relayNode()]))
+		]))
+
+		#expect(CallRelayData.parse(fromAck: offer)?.uuid == "abc")
+	}
+
 	@Test("decodes a doubly base64 hop-by-hop key")
 	func decodesDoublyEncodedHopByHopKey() {
 		let seed = Data((0..<30).map(UInt8.init))

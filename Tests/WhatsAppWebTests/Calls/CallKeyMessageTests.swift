@@ -42,7 +42,29 @@ struct CallKeyMessageTests {
 			]))
 		]))
 
-		#expect(WhatsAppClient.offerEncNode(in: offer, localJIDs: ["222"]) == mine)
+		#expect(WhatsAppClient.offerEncNode(in: offer, ownDevices: ["222:1@lid"]) == mine)
+	}
+
+	@Test("never falls back to the key of another device")
+	func neverUsesAnotherDevicesKey() {
+		let other = BinaryNode(tag: "enc", attrs: ["type": "msg"], content: .data(Data([1])))
+		let mine = BinaryNode(tag: "enc", attrs: ["type": "msg"], content: .data(Data([2])))
+		let offer = BinaryNode(tag: "offer", content: .nodes([
+			BinaryNode(tag: "destination", content: .nodes([
+				BinaryNode(tag: "to", attrs: ["jid": "222:0@lid"], content: .nodes([other])),
+				BinaryNode(tag: "to", attrs: ["jid": "222:5@lid"], content: .nodes([mine]))
+			]))
+		]))
+
+		#expect(WhatsAppClient.offerEncNode(in: offer, ownDevices: ["222:5@lid"]) == mine)
+		#expect(WhatsAppClient.offerEncNode(in: offer, ownDevices: ["222:9@lid"]) == nil)
+	}
+
+	@Test("qualifies our LID with the device of our id")
+	func qualifiesOwnLID() {
+		#expect(WhatsAppClient.deviceQualifiedLID("123@lid", deviceFrom: "5511:7@s.whatsapp.net") == "123:7@lid")
+		#expect(WhatsAppClient.deviceQualifiedLID("123:9@lid", deviceFrom: "5511:7@s.whatsapp.net") == "123:9@lid")
+		#expect(WhatsAppClient.deviceQualifiedLID("123@lid", deviceFrom: "5511@s.whatsapp.net") == "123@lid")
 	}
 
 	@Test("falls back to a direct enc child")
@@ -50,8 +72,8 @@ struct CallKeyMessageTests {
 		let enc = BinaryNode(tag: "enc", attrs: ["type": "msg"], content: .data(Data([3])))
 		let offer = BinaryNode(tag: "offer", content: .nodes([enc]))
 
-		#expect(WhatsAppClient.offerEncNode(in: offer, localJIDs: ["999"]) == enc)
-		#expect(WhatsAppClient.offerEncNode(in: BinaryNode(tag: "offer"), localJIDs: ["999"]) == nil)
+		#expect(WhatsAppClient.offerEncNode(in: offer, ownDevices: ["999@lid"]) == enc)
+		#expect(WhatsAppClient.offerEncNode(in: BinaryNode(tag: "offer"), ownDevices: ["999@lid"]) == nil)
 	}
 
 	@Test("keys receive audio to the device that answered")

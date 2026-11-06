@@ -127,7 +127,7 @@ extension WhatsAppClient {
 
 		let creator = offer.attrs["call-creator"] ?? offer.attrs["from"] ?? offerStanza.attrs["from"] ?? ""
 		let chatID = offerStanza.attrs["from"] ?? creator
-		guard let enc = Self.offerEncNode(in: offer, localJIDs: localJIDs) else {
+		guard let enc = Self.offerEncNode(in: offer, ownDevices: ownDeviceJIDs) else {
 			throw WhatsAppVoiceCallError.missingOfferKey
 		}
 
@@ -173,6 +173,28 @@ extension WhatsAppClient {
 			relayTransportEndpoint: relayTransportEndpoint,
 			routingToken: routingToken
 		))
+	}
+
+	/// Rejects a ringing call without decrypting its offer.
+	///
+	/// Without a reason this declines the call on every device of this account. `busy` is a statement
+	/// about this device alone, and the caller's other targets keep ringing.
+	public func rejectIncomingCall(
+		id callID: String,
+		callCreator: String,
+		to: String,
+		reason: String? = nil
+	) async throws {
+		try await sendNode(CallStanzaBuilder.reject(
+			callID: callID,
+			to: to,
+			callCreator: callCreator,
+			stanzaID: messageIDGenerator.generate(),
+			reason: reason
+		))
+		if reason == nil {
+			callOfferNodes.removeValue(forKey: callID)
+		}
 	}
 
 	/// Rejects an incoming call with an optional reason such as `busy`.
@@ -249,10 +271,12 @@ extension WhatsAppClient {
 
 	/// Configuration for the media session of an incoming call, taken from the offer's relay block.
 	public func mediaConfiguration(for call: WhatsAppIncomingVoiceCall) throws -> CallSession.Configuration {
-		guard let selfID = authenticationState?.credentials.me?.lid else {
+		guard let me = authenticationState?.credentials.me, let lid = me.lid else {
 			throw WhatsAppVoiceCallError.missingOwnLID
 		}
-		guard let relay = call.offer.firstChild(named: "relay").flatMap(CallRelayData.parse(relay:)) else {
+		// The caller keys its receive path to the device in our `<accept>`, so ours must name it.
+		let selfID = Self.deviceQualifiedLID(lid, deviceFrom: me.id)
+		guard let relay = CallRelayData.parse(fromAck: call.offer) else {
 			throw WhatsAppVoiceCallError.missingRelay
 		}
 
@@ -336,26 +360,48 @@ extension WhatsAppClient {
 		return lid.contains("@") ? lid : "\(lid)@lid"
 	}
 
-	private var localJIDs: Set<String> {
+	private var ownDeviceJIDs: [String] {
 		guard let me = authenticationState?.credentials.me else {
 			return []
 		}
 
-		return Set([me.id, me.lid].compactMap { $0 }.map { Self.userPart(of: $0) })
+		var devices = [me.id]
+		if let lid = me.lid {
+			devices.append(lid)
+			devices.append(Self.deviceQualifiedLID(lid, deviceFrom: me.id))
+		}
+
+		return devices
 	}
 
-	/// Finds the `<enc>` addressed to this account: either a direct child, or the one under the
-	/// `<destination><to jid=…>` entry that matches one of our identities.
-	static func offerEncNode(in offer: BinaryNode, localJIDs: Set<String>) -> BinaryNode? {
+	/// Finds the `<enc>` addressed to this device: a direct child, or the one under the
+	/// `<destination><to jid=…>` entry naming this device. Every device of the account can be listed
+	/// and each key only decrypts on its own device, so another device's entry is never a fallback.
+	static func offerEncNode(in offer: BinaryNode, ownDevices: [String]) -> BinaryNode? {
 		if let direct = offer.firstChild(named: "enc") {
 			return direct
 		}
 
 		let destinations = offer.firstChild(named: "destination")?.children(named: "to") ?? []
 		let own = destinations.first { to in
-			to.attrs["jid"].map { localJIDs.contains(userPart(of: $0)) } ?? false
+			guard let jid = to.attrs["jid"] else {
+				return false
+			}
+
+			return ownDevices.contains { isSameDevice($0, jid) }
 		}
-		return (own ?? destinations.first)?.firstChild(named: "enc")
+		return own?.firstChild(named: "enc")
+	}
+
+	/// `lid` with the device number of `id`, when `lid` does not already carry one.
+	static func deviceQualifiedLID(_ lid: String, deviceFrom id: String) -> String {
+		let user = lid.split(separator: "@").first.map(String.init) ?? lid
+		guard !user.contains(":"),
+			  let device = id.split(separator: "@").first?.split(separator: ":").dropFirst().first else {
+			return lid
+		}
+
+		return "\(user):\(device)@lid"
 	}
 
 	static func userPart(of jid: String) -> String {

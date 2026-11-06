@@ -71,7 +71,19 @@ public struct CallRelayData: Equatable, Sendable {
 
 	/// Finds and parses the `<relay>` child of a call ack or offer node.
 	public static func parse(fromAck node: BinaryNode) -> CallRelayData? {
-		node.firstChild(named: "relay").flatMap(parse(relay:))
+		findRelay(in: node).flatMap(parse(relay:))
+	}
+
+	/// The first `<relay>` at any depth: its position differs between acks and offers.
+	static func findRelay(in node: BinaryNode) -> BinaryNode? {
+		if node.tag == "relay" {
+			return node
+		}
+		guard case let .nodes(children)? = node.content else {
+			return nil
+		}
+
+		return children.lazy.compactMap(findRelay(in:)).first
 	}
 
 	public static func parse(relay: BinaryNode) -> CallRelayData? {
