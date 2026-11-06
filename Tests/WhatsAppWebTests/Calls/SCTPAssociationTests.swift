@@ -127,6 +127,18 @@ struct SCTPAssociationTests {
 		#expect(messages(&server) == [Data([4])])
 	}
 
+	@Test("announces FORWARD-TSN in the supported extensions of INIT")
+	func announcesForwardTSNInInit() throws {
+		var client = SCTPAssociation(role: .client)
+		client.connect(now: 0)
+		let transmitted = client.pollTransmit()
+		let packet = [UInt8](try #require(transmitted))
+
+		// Common header 12, chunk header 4, fixed INIT fields 16, then the first parameter.
+		#expect(Array(packet[32..<38]) == [0x80, 0x08, 0x00, 0x06, 130, 192])
+		#expect(SCTPAssociation.checksumIsValid(packet))
+	}
+
 	@Test("ignores corrupted packets")
 	func ignoresCorruptedPackets() throws {
 		var (client, server) = established()

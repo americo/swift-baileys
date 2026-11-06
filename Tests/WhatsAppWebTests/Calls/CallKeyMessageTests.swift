@@ -54,6 +54,34 @@ struct CallKeyMessageTests {
 		#expect(WhatsAppClient.offerEncNode(in: BinaryNode(tag: "offer"), localJIDs: ["999"]) == nil)
 	}
 
+	@Test("keys receive audio to the device that answered")
+	func keysToAnsweringDevice() {
+		#expect(WhatsAppClient.answeringParticipantID(peer: "123@lid", sender: "123:7@lid") == "123:7@lid")
+		#expect(WhatsAppClient.answeringParticipantID(peer: "123@lid", sender: "5511:3@s.whatsapp.net") == "123:3@lid")
+		#expect(WhatsAppClient.answeringParticipantID(peer: "123@lid", sender: "5511@s.whatsapp.net") == "123:0@lid")
+	}
+
+	@Test("compares devices by user and device number")
+	func comparesDevices() {
+		#expect(WhatsAppClient.isSameDevice("1:2@lid", "1:2@lid"))
+		#expect(WhatsAppClient.isSameDevice("1@lid", "1:0@lid"))
+		#expect(!WhatsAppClient.isSameDevice("1:2@lid", "1:3@lid"))
+	}
+
+	@Test("reads devices from an ack without entering the relay block")
+	func readsAckDevices() {
+		let ack = BinaryNode(tag: "ack", content: .nodes([
+			BinaryNode(tag: "relay", content: .nodes([BinaryNode(tag: "device", attrs: ["jid": "no@lid"])])),
+			BinaryNode(tag: "devices", content: .nodes([
+				BinaryNode(tag: "device", attrs: ["jid": "1:2@lid"]),
+				BinaryNode(tag: "device", attrs: ["jid": "1:2@lid"]),
+				BinaryNode(tag: "device", attrs: ["jid": "1:3@lid"])
+			]))
+		]))
+
+		#expect(WhatsAppClient.ackDevices(in: ack) == ["1:2@lid", "1:3@lid"])
+	}
+
 	@Test("extracts the user part of a device jid")
 	func extractsUserPart() {
 		#expect(WhatsAppClient.userPart(of: "5511:3@s.whatsapp.net") == "5511")

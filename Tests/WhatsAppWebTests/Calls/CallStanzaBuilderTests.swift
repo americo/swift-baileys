@@ -38,12 +38,11 @@ struct CallStanzaBuilderTests {
 		}
 
 		#expect(children.map(\.tag) == [
-			"privacy", "audio", "audio", "net", "capability", "enc", "encopt", "device-identity"
+			"privacy", "audio", "net", "capability", "enc", "encopt", "device-identity"
 		])
-		#expect(children[1].attrs["rate"] == "8000")
-		#expect(children[2].attrs["rate"] == "16000")
-		#expect(children[5].attrs["type"] == "msg")
-		#expect(children[5].content == .data(Data([1, 2])))
+		#expect(children[1].attrs["rate"] == "16000")
+		#expect(children[4].attrs["type"] == "msg")
+		#expect(children[4].content == .data(Data([1, 2])))
 	}
 
 	@Test("offer addresses several devices through destination")
@@ -83,8 +82,8 @@ struct CallStanzaBuilderTests {
 			return
 		}
 
-		#expect(children.map(\.tag) == ["audio", "audio", "te", "net", "encopt", "capability", "rte", "voip_settings"])
-		#expect(children[3].attrs["medium"] == "2")
+		#expect(children.map(\.tag) == ["audio", "te", "net", "encopt", "capability", "rte", "voip_settings"])
+		#expect(children[2].attrs["medium"] == "2")
 		#expect(children.last?.content == .data(CallVoIPSettings.standardOpus16kHzClock))
 	}
 
@@ -102,7 +101,47 @@ struct CallStanzaBuilderTests {
 			return
 		}
 
-		#expect(children.map(\.tag) == ["audio", "audio", "encopt", "capability"])
+		#expect(children.map(\.tag) == ["audio", "encopt", "capability"])
+	}
+
+	@Test("transport carries the round and message type the caller answers with")
+	func transportCarriesRoundAndType() throws {
+		let node = CallStanzaBuilder.transport(callID: "ABC", to: "1:2@lid", callCreator: "9@lid", stanzaID: "s")
+		let transport = try #require(node.children(named: "transport").first)
+
+		#expect(node.attrs["to"] == "1:2@lid")
+		#expect(transport.attrs["p2p-cand-round"] == "1")
+		#expect(transport.attrs["transport-message-type"] == "1")
+		#expect(transport.children(named: "net").first?.attrs["protocol"] == "0")
+	}
+
+	@Test("relay latency encodes the offset and lists the devices")
+	func relayLatencyEncodesOffset() throws {
+		let node = CallStanzaBuilder.relayLatency(
+			callID: "ABC",
+			to: "1@lid",
+			callCreator: "9@lid",
+			stanzaID: "s",
+			latencyMs: 40,
+			relayName: "gru1",
+			relayAddress: Data([1, 2, 3, 4, 5, 6]),
+			devices: ["1:2@lid"]
+		)
+		let action = try #require(node.children(named: "relaylatency").first)
+
+		#expect(action.children(named: "te").first?.attrs["latency"] == "33554472")
+		#expect(action.children(named: "te").first?.attrs["relay_name"] == "gru1")
+		#expect(action.children(named: "destination").first?.children(named: "to").first?.attrs["jid"] == "1:2@lid")
+	}
+
+	@Test("offer receipt echoes the stanza id")
+	func offerReceiptEchoesStanzaID() throws {
+		let node = CallStanzaBuilder.offerReceipt(callID: "ABC", to: "1:2@lid", callCreator: "1:2@lid", stanzaID: "st", from: nil)
+
+		#expect(node.tag == "receipt")
+		#expect(node.attrs["id"] == "st")
+		#expect(node.attrs["from"] == nil)
+		#expect(node.children(named: "offer").first?.attrs["call-id"] == "ABC")
 	}
 
 	@Test("reject and terminate include optional reasons")

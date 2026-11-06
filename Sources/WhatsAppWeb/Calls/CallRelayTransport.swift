@@ -124,6 +124,11 @@ public actor CallRelayTransport {
 	private static func parameters(queue: DispatchQueue) -> NWParameters {
 		let tls = NWProtocolTLS.Options()
 		sec_protocol_options_set_min_tls_protocol_version(tls.securityProtocolOptions, .DTLSv12)
+		// The relay requests a client certificate and fails the handshake without one. It does not
+		// matter which: without an identity (before macOS 15) the attempt goes ahead and is refused.
+		if let identity = try? CallDTLSIdentity.make(), let secIdentity = sec_identity_create(identity) {
+			sec_protocol_options_set_local_identity(tls.securityProtocolOptions, secIdentity)
+		}
 		// The relay certificate is not verified: media is authenticated by the call key instead.
 		sec_protocol_options_set_verify_block(tls.securityProtocolOptions, { _, _, complete in
 			complete(true)

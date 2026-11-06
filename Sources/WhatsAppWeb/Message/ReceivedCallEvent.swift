@@ -24,6 +24,8 @@ public struct WhatsAppCallEvent: Equatable, Sendable {
 	public let status: WhatsAppCallUpdateType
 	public let offline: Bool
 	public let latencyMs: Int?
+	/// The device that sent this stanza. An `accept` names the device that answered the call.
+	public let senderJID: String?
 
 	public init(
 		chatID: String,
@@ -36,7 +38,8 @@ public struct WhatsAppCallEvent: Equatable, Sendable {
 		isVideo: Bool? = nil,
 		status: WhatsAppCallUpdateType,
 		offline: Bool,
-		latencyMs: Int? = nil
+		latencyMs: Int? = nil,
+		senderJID: String? = nil
 	) {
 		self.chatID = chatID
 		self.from = from
@@ -49,5 +52,6 @@ public struct WhatsAppCallEvent: Equatable, Sendable {
 		self.status = status
 		self.offline = offline
 		self.latencyMs = latencyMs
+		self.senderJID = senderJID
 	}
 }

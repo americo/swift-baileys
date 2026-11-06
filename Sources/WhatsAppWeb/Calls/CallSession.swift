@@ -54,7 +54,9 @@ public actor CallSession {
 
 	public static let allocateRetryInterval: Duration = .seconds(1)
 	public static let allocateTimeout: Duration = .seconds(10)
-	public static let pingInterval: Duration = .seconds(2)
+	/// The Allocate is re-sent with a fresh ping at this cadence for the whole call: the relay takes
+	/// it as consent to keep forwarding.
+	public static let keepaliveInterval: Duration = .seconds(1)
 
 	/// Decoded PCM frames (16 kHz mono) from the peer.
 	public nonisolated let receivedAudio: AsyncStream<[Int16]>
@@ -81,6 +83,8 @@ public actor CallSession {
 	public private(set) var framesSent = 0
 	public private(set) var framesReceived = 0
 	public private(set) var packetsRejected = 0
+	public private(set) var decodeFailures = 0
+	public private(set) var keysRejected = 0
 
 	/// Builds a session. `link` defaults to the DTLS+SCTP transport to the relay the call selected.
 	public init(configuration: Configuration, link: (any CallRelayLink)? = nil) throws {
@@ -141,6 +145,7 @@ public actor CallSession {
 
 		try await link.open()
 		isRunning = true
+		WhatsAppLog.logger.notice("call \(self.configuration.callID, privacy: .public): relay channel open \(self.relayHost, privacy: .public):\(self.relayPort)")
 
 		let messages = link.messages
 		receiveTask = Task { [weak self] in
@@ -168,10 +173,11 @@ public actor CallSession {
 			}
 		}
 
+		WhatsAppLog.logger.notice("call \(self.configuration.callID, privacy: .public): relay allocated")
 		keepaliveTask = Task { [weak self] in
 			while !Task.isCancelled {
-				try? await Task.sleep(for: Self.pingInterval)
-				await self?.sendPing()
+				try? await Task.sleep(for: Self.keepaliveInterval)
+				await self?.sendKeepalive()
 			}
 		}
 	}
@@ -193,6 +199,7 @@ public actor CallSession {
 			return
 		}
 
+		WhatsAppLog.logger.notice("call \(self.configuration.callID, privacy: .public): stopped sent=\(self.framesSent) received=\(self.framesReceived) rejected=\(self.packetsRejected) badKeys=\(self.keysRejected) undecodable=\(self.decodeFailures)")
 		isRunning = false
 		isAllocated = false
 		keepaliveTask?.cancel()
@@ -236,16 +243,23 @@ public actor CallSession {
 			let pcm = try decoder.decode(received.payload)
 			framesReceived += 1
 			receivedContinuation.yield(pcm)
+		} catch CallAudioPipeline.ReceiveError.authenticationFailed {
+			packetsRejected += 1
+			keysRejected += 1
+		} catch is CallAudioPipeline.ReceiveError {
+			packetsRejected += 1
 		} catch {
 			packetsRejected += 1
+			decodeFailures += 1
 		}
 	}
 
-	private func sendPing() async {
+	private func sendKeepalive() async {
 		guard isRunning else {
 			return
 		}
 
+		try? await link.send(allocateRequest)
 		let transaction = Data((0..<12).map { _ in UInt8.random(in: 0...255) })
 		try? await link.send(CallSTUN.ping(transactionID: transaction))
 	}

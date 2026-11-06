@@ -44,6 +44,7 @@ public struct SCTPAssociation {
 	private static let handshakeMaxRetries = 8
 
 	private enum ChunkType {
+		static let reconfig: UInt8 = 130
 		static let data: UInt8 = 0
 		static let initiate: UInt8 = 1
 		static let initiateAck: UInt8 = 2
@@ -61,6 +62,7 @@ public struct SCTPAssociation {
 
 	private enum Parameter {
 		static let stateCookie: UInt16 = 7
+		static let supportedExtensions: UInt16 = 0x8008
 		static let forwardTSNSupported: UInt16 = 0xc000
 	}
 
@@ -134,7 +136,8 @@ public struct SCTPAssociation {
 		value += be32(Self.advertisedWindow)
 		value += be16(0xffff) + be16(0xffff)
 		value += be32(nextTSN)
-		value += parameter(Parameter.forwardTSNSupported, [])
+		// The extensions the WebRTC stack that interoperates with the relay announces.
+		value += parameter(Parameter.supportedExtensions, [ChunkType.reconfig, ChunkType.forwardTSN])
 		let packet = makePacket(verificationTag: 0, chunks: [chunk(ChunkType.initiate, 0, value)])
 		state = .cookieWait
 		startHandshakeTimer(packet, now: now)
@@ -335,7 +338,7 @@ public struct SCTPAssociation {
 		let peerInitiateTag = read32(value, 0)
 		let peerWindow = read32(value, 4)
 		let peerInitialTSN = read32(value, 12)
-		let forward = parameters(value, from: 16).contains { $0.type == Parameter.forwardTSNSupported }
+		let forward = advertisesForwardTSN(parameters(value, from: 16))
 		guard peerInitiateTag != 0 else {
 			return
 		}
@@ -349,7 +352,7 @@ public struct SCTPAssociation {
 			+ be32(tag) + be32(initialTSN) + be32(forward ? 1 : 0)
 		var reply = be32(tag) + be32(Self.advertisedWindow) + be16(0xffff) + be16(0xffff) + be32(initialTSN)
 		reply += parameter(Parameter.stateCookie, cookie)
-		reply += parameter(Parameter.forwardTSNSupported, [])
+		reply += parameter(Parameter.supportedExtensions, [ChunkType.reconfig, ChunkType.forwardTSN])
 		outbox.append(makePacket(
 			verificationTag: peerInitiateTag,
 			chunks: [chunk(ChunkType.initiateAck, 0, reply)]
@@ -368,11 +371,19 @@ public struct SCTPAssociation {
 
 		peerTag = read32(value, 0)
 		cumulativeTSN = read32(value, 12) &- 1
-		peerSupportsForwardTSN = params.contains { $0.type == Parameter.forwardTSNSupported }
+		peerSupportsForwardTSN = advertisesForwardTSN(params)
 		let packet = makePacket(verificationTag: peerTag, chunks: [chunk(ChunkType.cookieEcho, 0, cookie)])
 		state = .cookieEchoed
 		startHandshakeTimer(packet, now: now)
 		outbox.append(packet)
+	}
+
+	/// A peer announces FORWARD-TSN either with its own parameter or in the extension list.
+	private func advertisesForwardTSN(_ params: [(type: UInt16, value: [UInt8])]) -> Bool {
+		params.contains { parameter in
+			parameter.type == Parameter.forwardTSNSupported
+				|| (parameter.type == Parameter.supportedExtensions && parameter.value.contains(ChunkType.forwardTSN))
+		}
 	}
 
 	private mutating func handleCookieEcho(_ value: [UInt8]) {

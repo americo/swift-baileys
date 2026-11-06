@@ -49,8 +49,11 @@ public struct CallOfferDeviceKey: Equatable, Sendable {
 /// Builders for the `<call>` stanzas of a 1:1 voice call. Child order matters: the server rejects
 /// out-of-order children, so each builder follows the order the official client sends.
 public enum CallStanzaBuilder {
-	public static let defaultAudioRates = ["8000", "16000"]
+	/// One `<audio>` per offered rate. WhatsApp selects its audio path by this rate, and the 16 kHz
+	/// Opus this library sends and receives is signaled as 16000 alone.
+	public static let defaultAudioRates = ["16000"]
 	public static let rejectReasonBusy = "busy"
+	public static let terminateReasonAcceptedElsewhere = "accepted_elsewhere"
 
 	/// `<offer>`: privacy → audio… → net → capability → destination|enc → encopt → device-identity.
 	public static func offer(
@@ -164,6 +167,66 @@ public enum CallStanzaBuilder {
 		}
 
 		return wrap(to: to, stanzaID: stanzaID, action: BinaryNode(tag: "terminate", attrs: attrs))
+	}
+
+	/// `<transport>`: the caller answers a callee's `<accept>` with it.
+	public static func transport(
+		callID: String,
+		to: String,
+		callCreator: String,
+		stanzaID: String
+	) -> BinaryNode {
+		wrap(to: to, stanzaID: stanzaID, action: BinaryNode(
+			tag: "transport",
+			attrs: [
+				"call-id": callID,
+				"call-creator": callCreator,
+				"p2p-cand-round": "1",
+				"transport-message-type": "1"
+			],
+			content: .nodes([BinaryNode(tag: "net", attrs: ["medium": "2", "protocol": "0"])])
+		))
+	}
+
+	/// `<relaylatency>`: announces the relay the caller dials. Latency is encoded as `0x2000000 + ms`.
+	public static func relayLatency(
+		callID: String,
+		to: String,
+		callCreator: String,
+		stanzaID: String,
+		latencyMs: Int,
+		relayName: String,
+		relayAddress: Data,
+		devices: [String]
+	) -> BinaryNode {
+		var children = [BinaryNode(
+			tag: "te",
+			attrs: ["latency": String(0x0200_0000 + latencyMs), "relay_name": relayName],
+			content: .data(relayAddress)
+		)]
+		if !devices.isEmpty {
+			children.append(BinaryNode(
+				tag: "destination",
+				content: .nodes(devices.map { BinaryNode(tag: "to", attrs: ["jid": $0]) })
+			))
+		}
+
+		return wrap(to: to, stanzaID: stanzaID, action: action("relaylatency", callID, callCreator, children))
+	}
+
+	/// `<receipt>` for an incoming `<offer>`; this is what makes the caller's phone show "ringing".
+	public static func offerReceipt(
+		callID: String,
+		to: String,
+		callCreator: String,
+		stanzaID: String,
+		from: String?
+	) -> BinaryNode {
+		BinaryNode(
+			tag: "receipt",
+			attrs: BinaryNodeAttributes.trimmingUndefined([("to", to), ("id", stanzaID), ("from", from)]),
+			content: .nodes([BinaryNode(tag: "offer", attrs: ["call-id": callID, "call-creator": callCreator])])
+		)
 	}
 
 	// MARK: Pieces

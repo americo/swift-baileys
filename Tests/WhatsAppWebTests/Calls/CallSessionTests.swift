@@ -188,6 +188,23 @@ struct CallSessionTests {
 		await session.stop()
 	}
 
+	@Test("keeps re-sending the allocate with a ping during the call")
+	func keepsAllocationAlive() async throws {
+		let relay = FakeRelay()
+		let session = try CallSession(
+			configuration: configuration(selfID: aliceLID, peerID: bobLID),
+			link: await FakeLink(relay: relay, leg: 0)
+		)
+		try await session.start()
+		let before = await relay.allocateRequests
+
+		try await Task.sleep(for: .milliseconds(1_300))
+
+		#expect(await relay.allocateRequests > before)
+		#expect(await relay.pings >= 1)
+		await session.stop()
+	}
+
 	@Test("cannot send before the session is running")
 	func cannotSendBeforeRunning() async throws {
 		let relay = FakeRelay()
@@ -242,6 +259,7 @@ struct CallSessionTests {
 
 		#expect(await session.framesReceived == 0)
 		#expect(await session.packetsRejected == 1)
+		#expect(await session.keysRejected == 1)
 		await session.stop()
 	}
 }

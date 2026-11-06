@@ -9,6 +9,7 @@ public enum WhatsAppVoiceCallError: Error, Equatable, Sendable {
 	case missingOwnLID
 	case peerLIDUnknown(String)
 	case missingRelay
+	case offerRejected(String)
 }
 
 /// An outgoing voice call whose `<offer>` was accepted by the server.
@@ -17,12 +18,14 @@ public struct WhatsAppOutgoingVoiceCall: Equatable, Sendable {
 	public let peer: String
 	public let callCreator: String
 	public let callKey: Data
+	/// Devices the offer rang, so the others can stop ringing once one of them answers.
+	public let devices: [String]
 	/// The server's `<ack class="call" type="offer">`; it carries the relay allocation.
 	public let offerAck: BinaryNode
 
 	public static func == (lhs: Self, rhs: Self) -> Bool {
 		lhs.callID == rhs.callID && lhs.peer == rhs.peer && lhs.callCreator == rhs.callCreator
-			&& lhs.callKey == rhs.callKey && lhs.offerAck == rhs.offerAck
+			&& lhs.callKey == rhs.callKey && lhs.devices == rhs.devices && lhs.offerAck == rhs.offerAck
 	}
 }
 
@@ -93,13 +96,20 @@ extension WhatsAppClient {
 		)
 
 		let ack = try await query(offer, timeout: .seconds(20))
-		return WhatsAppOutgoingVoiceCall(
+		if let error = ack.attrs["error"], !error.isEmpty, error != "0" {
+			throw WhatsAppVoiceCallError.offerRejected(error)
+		}
+
+		let call = WhatsAppOutgoingVoiceCall(
 			callID: callID,
 			peer: peer,
 			callCreator: callCreator,
 			callKey: callKey,
+			devices: devices,
 			offerAck: ack
 		)
+		await announceRelay(for: call)
+		return call
 	}
 
 	// MARK: Incoming
@@ -142,7 +152,7 @@ extension WhatsAppClient {
 	public func preacceptVoiceCall(_ call: WhatsAppIncomingVoiceCall) async throws {
 		try await sendNode(CallStanzaBuilder.preaccept(
 			callID: call.callID,
-			to: call.callCreator,
+			to: call.chatID,
 			callCreator: call.callCreator,
 			stanzaID: messageIDGenerator.generate()
 		))
@@ -157,7 +167,7 @@ extension WhatsAppClient {
 	) async throws {
 		try await sendNode(CallStanzaBuilder.accept(
 			callID: call.callID,
-			to: call.callCreator,
+			to: call.chatID,
 			callCreator: call.callCreator,
 			stanzaID: messageIDGenerator.generate(),
 			relayTransportEndpoint: relayTransportEndpoint,
@@ -169,12 +179,37 @@ extension WhatsAppClient {
 	public func rejectVoiceCall(_ call: WhatsAppIncomingVoiceCall, reason: String? = nil) async throws {
 		try await sendNode(CallStanzaBuilder.reject(
 			callID: call.callID,
-			to: call.callCreator,
+			to: call.chatID,
 			callCreator: call.callCreator,
 			stanzaID: messageIDGenerator.generate(),
 			reason: reason
 		))
 		callOfferNodes.removeValue(forKey: call.callID)
+	}
+
+	/// Tells the other devices of the callee to stop ringing and answers the `<accept>` with
+	/// `<transport>`, as the official client does when it is the caller.
+	public func announceAnswer(of call: WhatsAppOutgoingVoiceCall, answeredBy sender: String) async {
+		for device in call.devices where !Self.isSameDevice(device, sender) {
+			try? await sendNode(CallStanzaBuilder.terminate(
+				callID: call.callID,
+				to: device,
+				callCreator: call.callCreator,
+				stanzaID: messageIDGenerator.generate(),
+				reason: CallStanzaBuilder.terminateReasonAcceptedElsewhere
+			))
+		}
+
+		guard let stanzaID = try? messageIDGenerator.generate() else {
+			return
+		}
+
+		try? await sendNode(CallStanzaBuilder.transport(
+			callID: call.callID,
+			to: sender,
+			callCreator: call.callCreator,
+			stanzaID: stanzaID
+		))
 	}
 
 	/// Ends a call in progress, or cancels an outgoing call that has not been answered.
@@ -192,7 +227,13 @@ extension WhatsAppClient {
 	// MARK: Media session
 
 	/// Configuration for the media session of an outgoing call, taken from the offer ack.
-	public func mediaConfiguration(for call: WhatsAppOutgoingVoiceCall) throws -> CallSession.Configuration {
+	///
+	/// `sender` is the device that answered: the peer encrypts under its own device id, so receive
+	/// keys derive from it, not from the bare contact the offer rang.
+	public func mediaConfiguration(
+		for call: WhatsAppOutgoingVoiceCall,
+		answeredBy sender: String
+	) throws -> CallSession.Configuration {
 		guard let relay = CallRelayData.parse(fromAck: call.offerAck) else {
 			throw WhatsAppVoiceCallError.missingRelay
 		}
@@ -200,7 +241,7 @@ extension WhatsAppClient {
 		return CallSession.Configuration(
 			callID: call.callID,
 			selfParticipantID: call.callCreator,
-			peerParticipantID: call.peer,
+			peerParticipantID: Self.answeringParticipantID(peer: call.peer, sender: sender),
 			callKey: call.callKey,
 			relay: relay
 		)
@@ -225,6 +266,62 @@ extension WhatsAppClient {
 	}
 
 	// MARK: Helpers
+
+	/// Announces the relay this caller dials. Best effort: the call proceeds without it.
+	private func announceRelay(for call: WhatsAppOutgoingVoiceCall) async {
+		guard let endpoint = CallRelayData.parse(fromAck: call.offerAck)?.mediaEndpoint(),
+			  let address = endpoint.ipv4Bytes,
+			  let stanzaID = try? messageIDGenerator.generate() else {
+			return
+		}
+
+		try? await sendNode(CallStanzaBuilder.relayLatency(
+			callID: call.callID,
+			to: call.peer,
+			callCreator: call.callCreator,
+			stanzaID: stanzaID,
+			latencyMs: endpoint.clientToRelayRTTMs ?? 40,
+			relayName: endpoint.relayName,
+			relayAddress: address,
+			devices: Self.ackDevices(in: call.offerAck)
+		))
+	}
+
+	/// The `<device jid>` entries of an offer ack, outside its relay block.
+	static func ackDevices(in node: BinaryNode) -> [String] {
+		guard case let .nodes(children)? = node.content else {
+			return []
+		}
+
+		var devices = [String]()
+		for child in children where child.tag != "relay" {
+			let found = child.tag == "device" ? [child.attrs["jid"]].compactMap { $0 } : ackDevices(in: child)
+			for device in found where !devices.contains(device) {
+				devices.append(device)
+			}
+		}
+
+		return devices
+	}
+
+	/// Participant id of the device that answered. It may answer in the phone-number namespace, in
+	/// which case its device number moves onto the peer's LID.
+	static func answeringParticipantID(peer: String, sender: String) -> String {
+		if sender.hasSuffix("@lid") {
+			return sender
+		}
+
+		let device = sender.split(separator: "@").first?.split(separator: ":").dropFirst().first.map(String.init) ?? "0"
+		return "\(userPart(of: peer)):\(device)@lid"
+	}
+
+	static func isSameDevice(_ lhs: String, _ rhs: String) -> Bool {
+		func device(_ jid: String) -> String {
+			jid.split(separator: "@").first?.split(separator: ":").dropFirst().first.map(String.init) ?? "0"
+		}
+
+		return userPart(of: lhs) == userPart(of: rhs) && device(lhs) == device(rhs)
+	}
 
 	/// A phone-number JID mapped to its LID, or the JID unchanged when it already is one.
 	private func resolvePeerLID(_ peer: String) async throws -> String {
