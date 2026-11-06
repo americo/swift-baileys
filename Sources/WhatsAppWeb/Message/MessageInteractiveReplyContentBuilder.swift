@@ -1,3 +1,5 @@
+import Foundation
+
 extension MessageContentBuilder {
 	static func buttonReply(_ content: OutgoingButtonReplyContent) -> Proto_Message {
 		switch content.style {
@@ -36,6 +38,35 @@ extension MessageContentBuilder {
 
 		var message = Proto_Message()
 		message.listResponseMessage = response
+		return message
+	}
+
+	static func nativeFlowReply(_ content: OutgoingNativeFlowReplyContent) -> Proto_Message {
+		var params: [String: String] = ["id": content.id]
+		if content.name == "single_select" {
+			params["title"] = content.displayText
+			if let description = content.description { params["description"] = description }
+		} else {
+			params["display_text"] = content.displayText
+		}
+		let json = (try? JSONSerialization.data(withJSONObject: params, options: [.sortedKeys]))
+			.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+
+		var body = Proto_Message.InteractiveResponseMessage.Body()
+		body.text = content.displayText
+		body.format = .extensions1
+
+		var flow = Proto_Message.InteractiveResponseMessage.NativeFlowResponseMessage()
+		flow.name = content.name
+		flow.paramsJson = json
+		flow.version = 3
+
+		var response = Proto_Message.InteractiveResponseMessage()
+		response.body = body
+		response.nativeFlowResponseMessage = flow
+
+		var message = Proto_Message()
+		message.interactiveResponseMessage = response
 		return message
 	}
 }
