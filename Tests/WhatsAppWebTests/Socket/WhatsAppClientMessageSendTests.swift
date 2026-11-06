@@ -554,7 +554,7 @@ private func waitForStoredTrustedContactToken(
 	throw MessageSendTestError.missingTrustedContactToken
 }
 
-private func sampleMessageSendCredentials() -> AuthenticationCredentials {
+func sampleMessageSendCredentials(me: WhatsAppUser = WhatsAppUser(id: "999@s.whatsapp.net")) -> AuthenticationCredentials {
 	AuthenticationCredentials(
 		noiseKey: AuthenticationKeyPair(privateKey: Data(repeating: 1, count: 32), publicKey: Data(repeating: 2, count: 32)),
 		pairingEphemeralKeyPair: AuthenticationKeyPair(privateKey: Data(repeating: 3, count: 32), publicKey: Data(repeating: 4, count: 32)),
@@ -566,7 +566,7 @@ private func sampleMessageSendCredentials() -> AuthenticationCredentials {
 		),
 		registrationID: 1,
 		advSecretKey: "adv-secret",
-		me: WhatsAppUser(id: "999@s.whatsapp.net"),
+		me: me,
 		nextPreKeyID: 1,
 		firstUnuploadedPreKeyID: 1,
 		accountSyncCounter: 0,

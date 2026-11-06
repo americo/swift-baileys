@@ -284,7 +284,13 @@ struct MessageRelayBuilder: Sendable {
 		additionalAttributes: [String: String] = [:],
 		additionalNodes: [BinaryNode] = []
 	) async throws -> BinaryNode {
-		let encodedMessage = try encoder.encode(message)
+		// The account's other devices read a direct message through the same envelope as on first send.
+		let isOwnDeviceCopy = !destinationJID.isGroupJID
+			&& additionalAttributes["category"] != "peer"
+			&& OwnDeviceAddressing.isOwnUser(participantJID, localJID: localUserJID, localLID: localUserLID)
+		let encodedMessage = try encoder.encode(
+			isOwnDeviceCopy ? deviceSentMessage(message, destinationJID: destinationJID) : message
+		)
 		let encrypted = try await encryptor.encryptMessage(SignalDirectMessageEncryptionRequest(
 			jid: participantJID,
 			localJID: localUserJID,
@@ -429,9 +435,8 @@ struct MessageRelayBuilder: Sendable {
 	}
 
 	private func shouldUseDeviceSentMessage(for recipientJID: String, localJID: String?, localLID: String?) -> Bool {
-		(JID.areSameUser(recipientJID, localJID) || JID.areSameUser(recipientJID, localLID)) &&
-			recipientJID != localJID &&
-			recipientJID != localLID
+		OwnDeviceAddressing.isOwnUser(recipientJID, localJID: localJID, localLID: localLID) &&
+			!OwnDeviceAddressing.isSendingDevice(recipientJID, localJID: localJID, localLID: localLID)
 	}
 
 	private func deviceSentMessage(_ message: Proto_Message, destinationJID: String) -> Proto_Message {
@@ -446,6 +451,25 @@ struct MessageRelayBuilder: Sendable {
 		}
 
 		return envelope
+	}
+}
+
+/// How the devices of the local account are told apart from each other.
+enum OwnDeviceAddressing {
+	static func isOwnUser(_ jid: String, localJID: String?, localLID: String?) -> Bool {
+		JID.areSameUser(jid, localJID) || JID.areSameUser(jid, localLID)
+	}
+
+	/// True only for the device running this client. `localLID` often carries no device part, so the
+	/// device number always comes from `localJID`: a bare `user@lid` is the primary phone, not this device.
+	static func isSendingDevice(_ jid: String, localJID: String?, localLID: String?) -> Bool {
+		guard isOwnUser(jid, localJID: localJID, localLID: localLID),
+			  let parsed = JID(jid) else {
+			return false
+		}
+
+		let localDevice = JID(localJID)?.device ?? JID(localLID)?.device ?? 0
+		return (parsed.device ?? 0) == localDevice
 	}
 }
 
