@@ -49,6 +49,8 @@ public struct WhatsAppCallEvent: Equatable, Sendable {
 	public let isNotice: Bool
 	/// Sent by another device of this account, which decides a ringing group call for this one too.
 	public let isFromOwnAccount: Bool
+	/// On a `.terminate`: it ends the call for this device only, and the call can be joined again.
+	public let isJoinable: Bool
 
 	public init(
 		chatID: String,
@@ -70,7 +72,8 @@ public struct WhatsAppCallEvent: Equatable, Sendable {
 		groupEpoch: GroupCallEpoch? = nil,
 		isMuted: Bool? = nil,
 		isNotice: Bool = false,
-		isFromOwnAccount: Bool = false
+		isFromOwnAccount: Bool = false,
+		isJoinable: Bool = false
 	) {
 		self.chatID = chatID
 		self.from = from
@@ -92,6 +95,7 @@ public struct WhatsAppCallEvent: Equatable, Sendable {
 		self.isMuted = isMuted
 		self.isNotice = isNotice
 		self.isFromOwnAccount = isFromOwnAccount
+		self.isJoinable = isJoinable
 	}
 
 	/// A `reject` that speaks only for the device that sent it, so the call stays alive.

@@ -384,6 +384,12 @@ public struct GroupCallState: Sendable {
 		}
 	}
 
+	/// Lets go of the relay allocation. One given to this device before it left means nothing for its
+	/// return, and the next can carry the same number, so it would not read as newer.
+	public mutating func dropRelay() {
+		snapshot?.relay = nil
+	}
+
 	/// Takes the rekey the initial ack left outstanding. Consumed exactly once.
 	public mutating func takeOwedRekey() -> Bool {
 		defer { owedRekey = false }

@@ -511,6 +511,18 @@ struct GroupCallStateTests {
 		#expect(state.snapshot?.relay?.transactionID == 1)
 	}
 
+	@Test("a dropped relay does not stop the next one being taken, even under the same number")
+	func droppedRelay() {
+		var state = state()
+		#expect(state.apply(update(1, [participant("100001", pid: 0)], relay: relay(transaction: 1))) == .applied)
+		#expect(state.apply(update(2, [participant("100001", pid: 0)], relay: relay(transaction: 1, host: [10, 0, 0, 2]))) == .applied)
+		#expect(state.snapshot?.relay?.mediaEndpoint()?.primaryIPv4?.host == "10.0.0.1")
+
+		state.dropRelay()
+		#expect(state.apply(update(3, [participant("100001", pid: 0)], relay: relay(transaction: 1, host: [10, 0, 0, 2]))) == .applied)
+		#expect(state.snapshot?.relay?.mediaEndpoint()?.primaryIPv4?.host == "10.0.0.2")
+	}
+
 	@Test("a rekey the ack asked for waits for the first ordered roster, and is taken once")
 	func owedRekey() {
 		var state = state()
@@ -1178,6 +1190,32 @@ struct GroupCallClientTests {
 
 		_ = await client.handleCallNode(stanza("terminate", from: "CALL@call"))
 		#expect(await client.callOfferNodes["CALL"] == nil)
+		#expect(await client.groupCallSnapshot(id: "CALL") == nil)
+	}
+
+	@Test("a terminate that can be joined again keeps the roster, and the end of the call does not")
+	func joinableTerminate() async {
+		let client = client()
+		_ = await client.handleCallNode(groupOffer())
+
+		_ = await client.handleCallNode(BinaryNode(
+			tag: "call",
+			attrs: ["from": "CALL@call", "id": "s3", "t": "3"],
+			content: .nodes([BinaryNode(
+				tag: "terminate",
+				attrs: ["call-id": "CALL", "call-creator": "100001:1@lid", "joinable": "1", "reason": "user_invisible"]
+			)])
+		))
+		#expect(await client.groupCallSnapshot(id: "CALL") != nil)
+
+		_ = await client.handleCallNode(BinaryNode(
+			tag: "call",
+			attrs: ["from": "CALL@call", "id": "s4", "t": "4"],
+			content: .nodes([BinaryNode(
+				tag: "terminate",
+				attrs: ["call-id": "CALL", "call-creator": "100001:1@lid", "reason": "group_call_ended"]
+			)])
+		))
 		#expect(await client.groupCallSnapshot(id: "CALL") == nil)
 	}
 

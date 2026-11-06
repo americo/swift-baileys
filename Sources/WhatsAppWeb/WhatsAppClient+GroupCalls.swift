@@ -275,6 +275,33 @@ extension WhatsAppClient {
 		)
 	}
 
+	/// Goes back into a group call this device left, while the others are still in it.
+	///
+	/// A device that has left stays on the roster as `invited`, so this answers the way an invitation is
+	/// answered. The answer brings a roster with a new relay, and a key by `.groupEpoch`, as in
+	/// `answerGroupCall`. What this device held from before does not apply to its return.
+	public func rejoinGroupCall(id callID: String, callCreator: String, video: Bool) async throws {
+		groupCalls[callID]?.state.dropRelay()
+		groupCalls[callID]?.epochs = []
+		groupCalls[callID]?.keyInFlight = nil
+
+		let scope = groupCallScope(callID: callID)
+		try await sendNode(CallStanzaBuilder.preaccept(
+			callID: callID,
+			to: scope,
+			callCreator: callCreator,
+			stanzaID: messageIDGenerator.generate(),
+			video: video
+		))
+		try await sendNode(CallStanzaBuilder.accept(
+			callID: callID,
+			to: scope,
+			callCreator: callCreator,
+			stanzaID: messageIDGenerator.generate(),
+			video: video
+		))
+	}
+
 	// MARK: Media session
 
 	/// Media configuration of a call from its current roster, which must hold this device and a relay.
@@ -547,8 +574,10 @@ extension WhatsAppClient {
 			groupUpdate: committed
 		)]))
 
-		// Signal sessions may need the network, and the stanza loop cannot wait on what it delivers.
-		if isFresh, update.isRekeyRequested || owesKey, record.keyInFlight != committed.transactionID {
+		// Signal sessions may need the network, and the stanza loop cannot wait on what it delivers. A device
+		// that has left the call hears its rosters still, and has no part in its keys.
+		if isFresh, update.isRekeyRequested || owesKey, record.keyInFlight != committed.transactionID,
+		   isThisDeviceConnected(to: committed) {
 			groupCalls[update.callID]?.keyInFlight = committed.transactionID
 			Task { [weak self] in
 				await self?.distributeGroupEpoch(for: committed, chatID: chatID, date: date)
@@ -613,6 +642,14 @@ extension WhatsAppClient {
 		return record?.state.snapshot?.participants.contains { participant in
 			CallJID.isSameUser(participant.jid, creator) && participant.phoneJID.map { CallJID.isSameUser(sender, $0) } == true
 		} ?? false
+	}
+
+	private func isThisDeviceConnected(to update: GroupCallUpdate) -> Bool {
+		guard let me = authenticationState?.credentials.me, let lid = me.lid else {
+			return false
+		}
+
+		return Self.localRosterDevice(in: update, ownLID: Self.deviceQualifiedLID(lid, deviceFrom: me.id), ownPhone: me.id) != nil
 	}
 
 	/// Who sent a call stanza. Group signaling arrives from the call service, naming them as `participant`.

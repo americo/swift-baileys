@@ -99,7 +99,8 @@ extension WhatsAppClient {
 			groupUpdate: groupSnapshot,
 			isMuted: status == .mute ? infoChild.attrs["mute-state"] == "1" : nil,
 			isNotice: infoChild.tag == "offer_notice",
-			isFromOwnAccount: isFromOwnAccount
+			isFromOwnAccount: isFromOwnAccount,
+			isJoinable: status != .offer && infoChild.attrs["joinable"] == "1"
 		)
 
 		if status == .offer {
@@ -112,7 +113,7 @@ extension WhatsAppClient {
 			callOfferNodes.removeValue(forKey: call.id)
 			// Another device of this account answering says nothing about a call this one is in, and its
 			// roster and keys go on being needed. Only the end of the call retires them.
-			if isKnownGroup, status == .terminate || status == .timeout {
+			if isKnownGroup, status == .terminate || status == .timeout, !call.isJoinable {
 				forgetGroupCall(id: call.id)
 			}
 		}
