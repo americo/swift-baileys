@@ -30,6 +30,21 @@ struct SignalSessionPreparerTests {
 		#expect(await injector.bundles == [sampleBundle(jid: "missing@s.whatsapp.net")])
 	}
 
+	@Test("matches a primary-device bundle the server answers with a :0 device")
+	func matchesPrimaryDeviceBundleAnsweredWithZeroDevice() async throws {
+		let keys = InMemorySignalKeyStore(storage: [:])
+		let bundleResolver = StubSignalBundleResolving(result: [
+			sampleBundle(jid: "123:0@lid")
+		])
+		let injector = RecordingSignalSessionInjector()
+		let preparer = SignalSessionPreparer(keys: keys, bundleResolver: bundleResolver, sessionInjector: injector)
+
+		let didFetch = try await preparer.assertSessions(for: ["123@lid"])
+
+		#expect(didFetch == true)
+		#expect(await injector.bundles.map(\.jid) == ["123@lid"])
+	}
+
 	@Test("force refresh fetches all unique sessions")
 	func forceRefreshFetchesAllUniqueSessions() async throws {
 		let keys = InMemorySignalKeyStore(storage: [
