@@ -25,7 +25,8 @@ public struct SignalSessionBundle: Equatable, Sendable {
 	public let registrationID: Int
 	public let identityKey: Data
 	public let signedPreKey: SignalPreKey
-	public let preKey: SignalPreKey
+	/// WhatsApp omits the one-time pre-key when a device has run out of them; X3DH works without it.
+	public let preKey: SignalPreKey?
 
 	public var address: SignalProtocolAddress? {
 		SignalProtocolAddress(jid: jid)
@@ -39,7 +40,7 @@ public struct SignalSessionBundle: Equatable, Sendable {
 		SignalPreKey.curve25519PublicKey(from: identityKey) != nil
 			&& signedPreKey.curve25519PublicKey != nil
 			&& signedPreKey.signature?.count == 64
-			&& preKey.curve25519PublicKey != nil
+			&& (preKey == nil || preKey?.curve25519PublicKey != nil)
 	}
 
 	public func validatedAddress() throws -> SignalProtocolAddress {
@@ -67,12 +68,20 @@ public struct SignalSessionBundle: Equatable, Sendable {
 		guard let identityKey = identityCurve25519PublicKey,
 			  let signedPreKeyPublicKey = signedPreKey.curve25519PublicKey,
 			  let signedPreKeySignature = signedPreKey.signature,
-			  signedPreKeySignature.count == 64,
-			  let preKeyPublicKey = preKey.curve25519PublicKey else {
+			  signedPreKeySignature.count == 64 else {
 			throw SignalSessionBundleValidationError.invalidKeyMaterial
 		}
-		guard (1...0xFF_FF_FF).contains(signedPreKey.keyID),
-			  (1...0xFF_FF_FF).contains(preKey.keyID) else {
+		var preKeyPublicKey: Data?
+		if let preKey {
+			guard let publicKey = preKey.curve25519PublicKey else {
+				throw SignalSessionBundleValidationError.invalidKeyMaterial
+			}
+			guard (1...0xFF_FF_FF).contains(preKey.keyID) else {
+				throw SignalSessionBundleValidationError.invalidKeyID
+			}
+			preKeyPublicKey = publicKey
+		}
+		guard (1...0xFF_FF_FF).contains(signedPreKey.keyID) else {
 			throw SignalSessionBundleValidationError.invalidKeyID
 		}
 
@@ -86,7 +95,7 @@ public struct SignalSessionBundle: Equatable, Sendable {
 			signedPreKeyID: signedPreKey.keyID,
 			signedPreKeyCurve25519PublicKey: signedPreKeyPublicKey,
 			signedPreKeySignature: signedPreKeySignature,
-			preKeyID: preKey.keyID,
+			preKeyID: preKey?.keyID,
 			preKeyCurve25519PublicKey: preKeyPublicKey
 		)
 	}
@@ -96,7 +105,7 @@ public struct SignalSessionBundle: Equatable, Sendable {
 		registrationID: Int,
 		identityKey: Data,
 		signedPreKey: SignalPreKey,
-		preKey: SignalPreKey
+		preKey: SignalPreKey?
 	) {
 		self.jid = jid
 		self.registrationID = registrationID
@@ -117,8 +126,8 @@ public struct SignalSessionNativeInstallRequest: Equatable, Sendable {
 	public let signedPreKeyID: Int
 	public let signedPreKeyCurve25519PublicKey: Data
 	public let signedPreKeySignature: Data
-	public let preKeyID: Int
-	public let preKeyCurve25519PublicKey: Data
+	public let preKeyID: Int?
+	public let preKeyCurve25519PublicKey: Data?
 
 	public init(
 		jid: String,
@@ -130,8 +139,8 @@ public struct SignalSessionNativeInstallRequest: Equatable, Sendable {
 		signedPreKeyID: Int,
 		signedPreKeyCurve25519PublicKey: Data,
 		signedPreKeySignature: Data,
-		preKeyID: Int,
-		preKeyCurve25519PublicKey: Data
+		preKeyID: Int?,
+		preKeyCurve25519PublicKey: Data?
 	) {
 		self.jid = jid
 		self.address = address
@@ -160,11 +169,12 @@ public struct SignalSessionNativeInstallRequest: Equatable, Sendable {
 		guard identityCurve25519PublicKey.count == 32,
 			  signedPreKeyCurve25519PublicKey.count == 32,
 			  signedPreKeySignature.count == 64,
-			  preKeyCurve25519PublicKey.count == 32 else {
+			  (preKeyID == nil) == (preKeyCurve25519PublicKey == nil),
+			  preKeyCurve25519PublicKey.map({ $0.count == 32 }) ?? true else {
 			throw SignalSessionBundleValidationError.invalidKeyMaterial
 		}
 		guard (1...0xFF_FF_FF).contains(signedPreKeyID),
-			  (1...0xFF_FF_FF).contains(preKeyID) else {
+			  preKeyID.map({ (1...0xFF_FF_FF).contains($0) }) ?? true else {
 			throw SignalSessionBundleValidationError.invalidKeyID
 		}
 	}
@@ -231,8 +241,20 @@ public struct SignalSessionBundleResolver: Sendable {
 				  SignalProtocolAddress(jid: jid) != nil,
 				  let registrationID = user.unsignedIntegerChild(named: "registration", length: 4),
 				  let identity = user.childData(named: "identity"),
-				  let signedPreKeyNode = user.firstChild(named: "skey"),
-				  let preKeyNode = user.firstChild(named: "key") else {
+				  let signedPreKeyNode = user.firstChild(named: "skey") else {
+				var described: [String] = []
+				if case .nodes(let children)? = user.content {
+					for child in children {
+						var pairs: [String] = []
+						for (key, value) in child.attrs {
+							pairs.append(key + "=" + value)
+						}
+						pairs.sort()
+						described.append(child.tag + "(" + pairs.joined(separator: ",") + ")")
+					}
+				}
+				let kids = described.joined(separator: "+")
+				WhatsAppLog.logger.error("prekey bundle rejected jid=\(user.attrs["jid"] ?? "-", privacy: .public) children=\(kids, privacy: .public)")
 				throw SignalSessionBundleResolverError.invalidBundle
 			}
 
@@ -242,7 +264,7 @@ public struct SignalSessionBundleResolver: Sendable {
 					registrationID: registrationID,
 					identityKey: try signalPublicKey(identity),
 					signedPreKey: try parsePreKey(signedPreKeyNode, requiresSignature: true),
-					preKey: try parsePreKey(preKeyNode, requiresSignature: false)
+					preKey: try user.firstChild(named: "key").map { try parsePreKey($0, requiresSignature: false) }
 				)
 			)
 		}

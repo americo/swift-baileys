@@ -20,7 +20,28 @@ struct PublicSignalKeyMaterialTests {
 
 		#expect(bundle.identityCurve25519PublicKey == Data(repeating: 1, count: 32))
 		#expect(bundle.signedPreKey.curve25519PublicKey == Data(repeating: 2, count: 32))
-		#expect(bundle.preKey.curve25519PublicKey == Data(repeating: 4, count: 32))
+		#expect(bundle.preKey?.curve25519PublicKey == Data(repeating: 4, count: 32))
+	}
+
+	@Test("a bundle without a one-time pre-key is valid and installs without one")
+	func bundleWithoutOneTimePreKeyIsValid() throws {
+		let bundle = SignalSessionBundle(
+			jid: "123@lid",
+			registrationID: 1,
+			identityKey: Data([5]) + Data(repeating: 1, count: 32),
+			signedPreKey: SignalPreKey(
+				keyID: 2,
+				publicKey: Data([5]) + Data(repeating: 2, count: 32),
+				signature: Data(repeating: 3, count: 64)
+			),
+			preKey: nil
+		)
+
+		#expect(bundle.hasValidSignalKeyMaterial)
+		let request = try bundle.nativeInstallRequest()
+		#expect(request.preKeyID == nil)
+		#expect(request.preKeyCurve25519PublicKey == nil)
+		try request.validate()
 	}
 
 	@Test("invalid Signal public keys do not expose raw Curve25519 material")
