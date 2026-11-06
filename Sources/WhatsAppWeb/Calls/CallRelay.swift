@@ -17,6 +17,11 @@ public struct CallRelayEndpoint: Equatable, Sendable {
 	public let ipv4Bytes: Data?
 	public let addresses: [CallRelayAddress]
 	public let clientToRelayRTTMs: Int?
+
+	/// First IPv4 address and port of this relay.
+	public var primaryIPv4: (host: String, port: UInt16)? {
+		addresses.lazy.compactMap { address in address.ipv4.map { ($0, address.port) } }.first
+	}
 }
 
 /// The `<relay>` block of a call ack or offer: keys, tokens and the relay endpoints to dial.
@@ -40,6 +45,29 @@ public struct CallRelayData: Equatable, Sendable {
 	public var relayTokens: [Data]
 	public var authTokens: [Data]
 	public var endpoints: [CallRelayEndpoint]
+
+	/// Port the WhatsApp Web client dials; preferred when an endpoint offers it.
+	public static let webClientPort: UInt16 = 3480
+
+	/// The relay to carry media: prefers one on the web client port, then an outbound candidate
+	/// (not FNA, with an auth token), then any non-FNA one, then the first. At each tier an endpoint
+	/// that has both an IPv4 address to dial and a token we hold wins over one that does not.
+	public func mediaEndpoint() -> CallRelayEndpoint? {
+		func isUsable(_ endpoint: CallRelayEndpoint) -> Bool {
+			endpoint.primaryIPv4 != nil && relayTokens.indices.contains(endpoint.tokenID)
+				&& !relayTokens[endpoint.tokenID].isEmpty
+		}
+
+		func pick(usableOnly: Bool) -> CallRelayEndpoint? {
+			let candidates = endpoints.filter { !usableOnly || isUsable($0) }
+			return candidates.first { $0.primaryIPv4?.port == Self.webClientPort }
+				?? candidates.first { !$0.isFNA && $0.authTokenID != 0 }
+				?? candidates.first { !$0.isFNA }
+				?? candidates.first
+		}
+
+		return pick(usableOnly: true) ?? pick(usableOnly: false)
+	}
 
 	/// Finds and parses the `<relay>` child of a call ack or offer node.
 	public static func parse(fromAck node: BinaryNode) -> CallRelayData? {
