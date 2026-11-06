@@ -11,6 +11,7 @@ public enum CallRelayAllocate {
 	]
 
 	public static let audioSlot: UInt32 = 0
+	public static let videoSlot: UInt32 = 2
 
 	/// SSRC of a participant's stream: HKDF-SHA256 with the call id as input key material, the slot
 	/// word (little-endian) as salt and the participant id as info, read back little-endian.
@@ -26,6 +27,10 @@ public enum CallRelayAllocate {
 
 	public static func audioSSRC(callID: String, participantID: String) -> UInt32 {
 		ssrc(callID: callID, participantID: participantID, slot: audioSlot)
+	}
+
+	public static func videoSSRC(callID: String, participantID: String) -> UInt32 {
+		ssrc(callID: callID, participantID: participantID, slot: videoSlot)
 	}
 
 	/// Stream descriptors protobuf (`StreamDescriptors`, attribute 0x4024) for this call's streams.
