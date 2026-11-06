@@ -20,6 +20,9 @@ struct GroupCallRecord: Sendable {
 	/// The transaction a key is being generated for. An update and the ack it overtook can both ask, and
 	/// two different keys under one transaction would be refused by everyone who got the second.
 	var keyInFlight: UInt32?
+	/// What each device stated of itself in its offer, preaccept or accept, for a 1:1 call that may yet
+	/// become a group call and has to name them.
+	var deviceCapabilities = [String: Data]()
 	let createdAt = Date()
 
 	mutating func retain(_ epoch: GroupCallEpoch) {
@@ -347,6 +350,141 @@ extension WhatsAppClient {
 		forgetGroupCall(id: callID)
 	}
 
+	/// Asks someone into a call in progress. A 1:1 call has no roster yet, so this names its two ends, and
+	/// the call becomes a group call when the service answers with the first one.
+	///
+	/// `directPeerDevice` is the device at the other end of a 1:1 call.
+	public func inviteToCall(
+		callID: String,
+		callCreator: String,
+		target requested: String,
+		video: Bool,
+		directPeerDevice: String?
+	) async throws {
+		let target = try await CallJID.user(resolvePeerLID(requested))
+		let roster = try inviteRoster(
+			callID: callID,
+			target: target,
+			requested: requested,
+			video: video,
+			directPeerDevice: directPeerDevice
+		)
+		let devices = try await getUSyncDevices([target], useCache: true, ignoreZeroDevices: false)
+			.map(\.jid)
+			.filter { !CallJID.isHosted($0) }
+		guard !devices.isEmpty else {
+			throw WhatsAppVoiceCallError.noDevices
+		}
+
+		let ack = try await query(CallStanzaBuilder.groupInviteOffer(
+			callID: callID,
+			to: target,
+			callCreator: callCreator,
+			stanzaID: messageIDGenerator.generate(),
+			targetDevices: devices,
+			participants: roster,
+			video: video
+		), timeout: .seconds(20))
+		if let error = ack.attrs["error"], !error.isEmpty, error != "0", error != "207" {
+			throw WhatsAppVoiceCallError.offerRejected(error)
+		}
+	}
+
+	/// Who is in the call, for an invitation to `target`. Someone already on the roster who dropped off
+	/// can be rung again, which leaves them out of it.
+	private func inviteRoster(
+		callID: String,
+		target: String,
+		requested: String,
+		video: Bool,
+		directPeerDevice: String?
+	) throws -> [GroupCallParticipant] {
+		func isTarget(_ identity: String) -> Bool {
+			CallJID.isSameUser(identity, target) || CallJID.isSameUser(identity, requested)
+		}
+
+		if let snapshot = groupCalls[callID]?.state.snapshot {
+			let onRoster = snapshot.participants.first { participant in
+				[participant.jid, participant.phoneJID].compactMap { $0 }.contains(where: isTarget)
+			}
+			if onRoster?.isConnected == true {
+				throw WhatsAppVoiceCallError.alreadyInCall
+			}
+
+			let connected = snapshot.participants.filter(\.isConnected)
+			let limit = snapshot.connectedLimit == 0 ? GroupCallLimits.maxParticipants : Int(snapshot.connectedLimit)
+			if connected.count >= limit || (onRoster == nil && snapshot.participants.count >= GroupCallLimits.maxParticipants) {
+				throw WhatsAppVoiceCallError.groupTooLarge(connected.count + 1)
+			}
+
+			return connected
+		}
+
+		guard let directPeerDevice else {
+			throw WhatsAppVoiceCallError.unknownCall(callID)
+		}
+		if isTarget(directPeerDevice) {
+			throw WhatsAppVoiceCallError.alreadyInCall
+		}
+		guard let me = authenticationState?.credentials.me, let lid = me.lid else {
+			throw WhatsAppVoiceCallError.missingOwnLID
+		}
+
+		let ownDevice = Self.deviceQualifiedLID(lid, deviceFrom: me.id)
+		let capabilities = groupCalls[callID]?.deviceCapabilities ?? [:]
+		let peerCapability = capabilities.first { Self.isSameDevice($0.key, directPeerDevice) }?.value ?? Data()
+		return [
+			GroupCallParticipant(
+				jid: CallJID.user(ownDevice),
+				state: "connected",
+				devices: [GroupCallDevice(
+					jid: ownDevice,
+					capabilityVersion: 1,
+					capability: video ? CallCapability.standardOpusVideoOffer : CallCapability.standardOpusOffer
+				)]
+			),
+			GroupCallParticipant(
+				jid: CallJID.user(directPeerDevice),
+				state: "connected",
+				devices: [GroupCallDevice(
+					jid: directPeerDevice,
+					capabilityVersion: peerCapability.isEmpty ? nil : 1,
+					capability: peerCapability
+				)]
+			)
+		]
+	}
+
+	/// Tells the call which relay this device uses, as every member does for each allocation.
+	public func announceGroupRelay(callID: String, callCreator: String, relay: CallRelayData) async throws {
+		guard let endpoint = relay.forGroupMedia.mediaEndpoint(), let address = endpoint.ipv4Bytes else {
+			return
+		}
+
+		try await sendNode(CallStanzaBuilder.relayLatency(
+			callID: callID,
+			to: groupCallScope(callID: callID),
+			callCreator: callCreator,
+			stanzaID: messageIDGenerator.generate(),
+			latencyMs: endpoint.clientToRelayRTTMs ?? 40,
+			relayName: endpoint.relayName,
+			relayAddress: address,
+			devices: [],
+			transactionID: relay.transactionID
+		))
+	}
+
+	/// Keeps what a device says of itself on a call that may become a group call.
+	func noteCallCapability(in action: BinaryNode, sender: String, callID: String, creator: String) {
+		guard let capability = action.firstChild(named: "capability").flatMap(CallRelayData.contentBytes), !capability.isEmpty else {
+			return
+		}
+
+		var record = groupCalls[callID] ?? GroupCallRecord(state: GroupCallState(callID: callID, callCreator: creator))
+		record.deviceCapabilities[sender] = capability
+		storeGroupCallRecord(record, for: callID)
+	}
+
 	/// Announces this device's microphone, so the others can show it. `to` is the call scope for a group.
 	public func sendMuteState(_ muted: Bool, callID: String, to: String, callCreator: String) async throws {
 		try await sendNode(CallStanzaBuilder.mute(
@@ -390,6 +528,11 @@ extension WhatsAppClient {
 		}
 
 		storeGroupCallRecord(record, for: update.callID)
+		let roster = committed.participants.map { participant in
+			let devices = participant.devices.map { "\($0.jid)#\($0.pid.map(String.init) ?? "-")" }.joined(separator: ",")
+			return "\(participant.jid)[\(participant.state ?? "-")\(participant.error.map { " error=\($0)" } ?? "")](\(devices))"
+		}.joined(separator: " ")
+		WhatsAppLog.logger.notice("group call \(update.callID, privacy: .public): roster \(committed.transactionID) media=\(committed.media, privacy: .public) rekey=\(update.isRekeyRequested) limit=\(committed.connectedLimit) relay=\(committed.relay?.transactionID.map(String.init) ?? "-", privacy: .public) \(roster, privacy: .public)")
 		eventContinuation.yield(.call([WhatsAppCallEvent(
 			chatID: chatID,
 			from: update.callCreator,

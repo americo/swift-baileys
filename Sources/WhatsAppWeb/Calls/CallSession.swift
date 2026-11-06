@@ -208,6 +208,7 @@ public actor CallSession {
 	private let clock = ContinuousClock()
 	private let startInstant = ContinuousClock.now
 
+	public private(set) var consentRequestsAnswered = 0
 	public private(set) var videoFramesSent = 0
 	public private(set) var videoFramesReceived = 0
 	public private(set) var videoPacketsRejected = 0
@@ -380,7 +381,9 @@ public actor CallSession {
 
 	/// Encodes and sends one 60 ms microphone frame (960 samples at 16 kHz).
 	public func sendAudio(_ samples: [Int16]) async throws {
-		guard isRunning, isAllocated else {
+		// A group re-allocates during the call, and the relay already knows this device meanwhile. Going
+		// quiet until it answers is what would look like having left.
+		guard isRunning, isAllocated || group != nil else {
 			throw CallSessionError.notRunning
 		}
 		// A group's media waits for its key: there is nobody who could decrypt this yet.
@@ -415,7 +418,7 @@ public actor CallSession {
 		timestamp: UInt32,
 		capturedAt: ContinuousClock.Instant? = nil
 	) async throws {
-		guard isRunning, isAllocated else {
+		guard isRunning, isAllocated || group != nil else {
 			throw CallSessionError.notRunning
 		}
 		guard isSendingVideo else {
@@ -554,7 +557,7 @@ public actor CallSession {
 			return
 		}
 
-		WhatsAppLog.logger.notice("call \(self.configuration.callID, privacy: .public): stopped sent=\(self.framesSent) received=\(self.framesReceived) rejected=\(self.packetsRejected) badKeys=\(self.keysRejected) undecodable=\(self.decodeFailures) decodedPeak=\(self.decodedPeak) carried=\(self.carriedAudioPackets) videoSent=\(self.videoFramesSent) videoReceived=\(self.videoFramesReceived) videoLost=\(self.videoPacketsLost) videoRejected=\(self.videoPacketsRejected) resent=\(self.videoPacketsResent) keyframesAsked=\(self.keyframesRequestedByPeer)/\(self.keyframesRequestedFromPeer) bitrate=\(self.videoBitrate)")
+		WhatsAppLog.logger.notice("call \(self.configuration.callID, privacy: .public): stopped sent=\(self.framesSent) received=\(self.framesReceived) rejected=\(self.packetsRejected) badKeys=\(self.keysRejected) undecodable=\(self.decodeFailures) decodedPeak=\(self.decodedPeak) carried=\(self.carriedAudioPackets) consent=\(self.consentRequestsAnswered) videoSent=\(self.videoFramesSent) videoReceived=\(self.videoFramesReceived) videoLost=\(self.videoPacketsLost) videoRejected=\(self.videoPacketsRejected) resent=\(self.videoPacketsResent) keyframesAsked=\(self.keyframesRequestedByPeer)/\(self.keyframesRequestedFromPeer) bitrate=\(self.videoBitrate)")
 		isRunning = false
 		isAllocated = false
 		keepaliveTask?.cancel()
@@ -584,7 +587,7 @@ public actor CallSession {
 		}
 
 		if first & 0xc0 == 0 {
-			handleSTUN(message)
+			await handleSTUN(message)
 		} else if first >> 6 == 2 {
 			// RTP and RTCP share the path. RFC 5761 keeps their payload types from overlapping.
 			if message.count > 1, (192...223).contains(message[message.startIndex + 1]) {
@@ -595,7 +598,20 @@ public actor CallSession {
 		}
 	}
 
-	private func handleSTUN(_ message: Data) {
+	private func handleSTUN(_ message: Data) async {
+		// The relay asks now and then whether this device is still there (RFC 7675), and a device that
+		// never answers can be taken to have gone.
+		if CallSTUN.messageType(message) == CallSTUN.bindingRequest, let transaction = CallSTUN.transactionID(message) {
+			consentRequestsAnswered += 1
+			try? await link.send(CallSTUN.encode(
+				type: CallSTUN.bindingSuccess,
+				transactionID: transaction,
+				integrityKey: integrityKey,
+				includeFingerprint: true
+			))
+			return
+		}
+
 		// A group call re-allocates as its roster changes. An answer to an older request says nothing
 		// about the credentials now in use.
 		if group != nil, CallSTUN.transactionID(message) != allocateTransactionID {
@@ -603,10 +619,16 @@ public actor CallSession {
 		}
 
 		if CallSTUN.isAllocateOrBindingSuccess(message) {
+			if group != nil, !isAllocated, isRunning {
+				WhatsAppLog.logger.notice("call \(self.configuration.callID, privacy: .public): new relay allocation answered")
+			}
 			isAllocated = true
 			allocatePendingSince = nil
 		} else if CallSTUN.isAllocateError(message) {
 			allocateError = .some(CallSTUN.errorCode(message))
+			if group != nil {
+				WhatsAppLog.logger.error("call \(self.configuration.callID, privacy: .public): relay refused an allocation, code \(CallSTUN.errorCode(message) ?? 0)")
+			}
 		}
 	}
 
@@ -1346,6 +1368,10 @@ extension CallSession {
 			guard let received = try group.registry.unprotectAudio(message, from: id) else {
 				return
 			}
+			// A lone byte is a sender saying it has nothing to say, and is no frame to decode.
+			guard received.payload.count > 1 else {
+				return
+			}
 
 			group.audioReception[id, default: CallRTPReceptionStats()].observe(
 				ssrc: header.ssrc,
@@ -1474,7 +1500,7 @@ extension CallSession {
 	/// the relay. Peers do honor one addressed to them, and a lost picture otherwise waits for the sender's
 	/// next periodic keyframe, so it is worth asking.
 	public func requestParticipantKeyframe(_ id: String) async {
-		guard isRunning, isAllocated, let group,
+		guard isRunning, let group,
 			  let videoSSRC = group.registry.receivers[id]?.videoSSRC else {
 			return
 		}
@@ -1492,7 +1518,7 @@ extension CallSession {
 
 	/// One Sender Report per stream received, since each participant reads the block about their own.
 	private func sendGroupReports(_ group: GroupMediaState) async {
-		guard isRunning, isAllocated, group.isEpochReady else {
+		guard isRunning, group.isEpochReady else {
 			return
 		}
 

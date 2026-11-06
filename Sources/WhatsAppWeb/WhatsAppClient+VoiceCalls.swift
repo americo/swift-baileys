@@ -12,6 +12,7 @@ public enum WhatsAppVoiceCallError: Error, Equatable, Sendable {
 	case offerRejected(String)
 	/// More members than a call holds, counting this device.
 	case groupTooLarge(Int)
+	case alreadyInCall
 }
 
 /// An outgoing voice call whose `<offer>` was accepted by the server.
@@ -255,7 +256,8 @@ extension WhatsAppClient {
 		_ state: CallVideoState,
 		callID: String,
 		to: String,
-		callCreator: String
+		callCreator: String,
+		transactionID: UInt32? = nil
 	) async throws {
 		let announcesDecoder = state != .stopped && state != .upgradeReject && state != .upgradeCancel
 			&& state != .upgradeCancelByTimeout
@@ -266,7 +268,9 @@ extension WhatsAppClient {
 			stanzaID: messageIDGenerator.generate(),
 			state: state,
 			decoders: announcesDecoder ? CallStanzaBuilder.videoDecoders : nil,
-			deviceOrientation: announcesDecoder ? CallStanzaBuilder.uprightOrientation : nil
+			// Official clients state a rotation on every `<video>` in a group, where they are numbered.
+			deviceOrientation: announcesDecoder || transactionID != nil ? CallStanzaBuilder.uprightOrientation : nil,
+			transactionID: transactionID
 		))
 	}
 
@@ -366,7 +370,7 @@ extension WhatsAppClient {
 
 	/// Participant id of the device that answered. It may answer in the phone-number namespace, in
 	/// which case its device number moves onto the peer's LID.
-	static func answeringParticipantID(peer: String, sender: String) -> String {
+	public static func answeringParticipantID(peer: String, sender: String) -> String {
 		if sender.hasSuffix("@lid") {
 			return sender
 		}

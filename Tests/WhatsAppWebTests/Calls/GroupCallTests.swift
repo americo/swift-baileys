@@ -110,6 +110,76 @@ struct GroupCallStanzaTests {
 		#expect(decoded.attrs["to"] == "00AABB@call")
 	}
 
+	@Test("an invitation goes to the person, naming their devices and who is in the call")
+	func inviteShape() throws {
+		let node = CallStanzaBuilder.groupInviteOffer(
+			callID: "CALL",
+			to: "300003@lid",
+			callCreator: "100001:1@lid",
+			stanzaID: "REQ",
+			targetDevices: ["300003@lid", "300003:4@lid"],
+			participants: [
+				GroupCallParticipant(jid: "100001@lid", state: "connected", devices: [GroupCallDevice(
+					jid: "100001:1@lid",
+					capabilityVersion: 1,
+					capability: CallCapability.standardOpusOffer
+				)]),
+				GroupCallParticipant(jid: "200002@lid", state: "connected", devices: [GroupCallDevice(jid: "200002:0@lid")])
+			]
+		)
+
+		#expect(node.attrs["to"] == "300003@lid")
+		let offer = try #require(node.firstChild(named: "offer"))
+		guard case let .nodes(children)? = offer.content else {
+			Issue.record("the offer has no children")
+			return
+		}
+		#expect(children.map(\.tag) == ["audio", "net", "destination", "group_info"])
+		#expect(children[1].attrs["medium"] == "2")
+		#expect(children[2].children(named: "to").map { $0.attrs["jid"] } == ["300003@lid", "300003:4@lid"])
+		let users = children[3].children(named: "user")
+		#expect(users.map { $0.attrs["state"] } == ["connected", "connected"])
+		#expect(users[0].firstChild(named: "device")?.firstChild(named: "capability") != nil)
+	}
+
+	@Test("a relay announcement in a group names the allocation it is for")
+	func relayLatencyShape() throws {
+		let node = CallStanzaBuilder.relayLatency(
+			callID: "CALL",
+			to: "CALL@call",
+			callCreator: "100001:1@lid",
+			stanzaID: "REQ",
+			latencyMs: 40,
+			relayName: "gru",
+			relayAddress: Data([10, 0, 0, 1, 0x0d, 0x98]),
+			devices: [],
+			transactionID: 2
+		)
+
+		let action = try #require(node.firstChild(named: "relaylatency"))
+		#expect(action.attrs["transaction-id"] == "2")
+		#expect(action.firstChild(named: "te")?.attrs["relay_name"] == "gru")
+		#expect(action.firstChild(named: "destination") == nil)
+	}
+
+	@Test("a numbered video state in a group states a rotation even when stopping")
+	func numberedVideoState() throws {
+		let node = CallStanzaBuilder.videoState(
+			callID: "CALL",
+			to: "CALL@call",
+			callCreator: "100001:1@lid",
+			stanzaID: "REQ",
+			state: .stopped,
+			deviceOrientation: "0",
+			transactionID: 1
+		)
+
+		let action = try #require(node.firstChild(named: "video"))
+		#expect(action.attrs["state"] == "6")
+		#expect(action.attrs["transaction-id"] == "1")
+		#expect(action.attrs["device_orientation"] == "0")
+	}
+
 	@Test("a key goes to one device, under the transaction it belongs to")
 	func encRekeyShape() throws {
 		let node = CallStanzaBuilder.groupEncRekey(
@@ -700,6 +770,16 @@ struct GroupAudioMixerTests {
 private actor FakeGroupRelay {
 	private var legs: [Int: AsyncStream<Data>.Continuation] = [:]
 	private(set) var allocates = [Data]()
+	private(set) var bindingAnswers = [Data]()
+	private var answersAllocates = true
+
+	func stopAnswering() {
+		answersAllocates = false
+	}
+
+	func deliver(to leg: Int, _ message: Data) {
+		legs[leg]?.yield(message)
+	}
 
 	func register(_ leg: Int, _ continuation: AsyncStream<Data>.Continuation) {
 		legs[leg] = continuation
@@ -710,7 +790,11 @@ private actor FakeGroupRelay {
 			if CallSTUN.messageType(message) == CallSTUN.allocateRequest {
 				allocates.append(message)
 				let transaction = CallSTUN.transactionID(message) ?? Data(count: 12)
-				legs[leg]?.yield(CallSTUN.encode(type: CallSTUN.allocateSuccess, transactionID: transaction))
+				if answersAllocates {
+					legs[leg]?.yield(CallSTUN.encode(type: CallSTUN.allocateSuccess, transactionID: transaction))
+				}
+			} else if CallSTUN.messageType(message) == CallSTUN.bindingSuccess {
+				bindingAnswers.append(message)
 			}
 			return
 		}
@@ -899,6 +983,51 @@ struct GroupCallSessionTests {
 		try await a.applyGroupEpoch(GroupCallEpoch(transactionID: 2, key: Data(repeating: 0x43, count: 32)))
 		try await a.sendAudio(tone())
 		#expect(await a.framesSent == 2)
+		await a.stop()
+	}
+
+	@Test("the relay's question about whether this device is still there gets an answer")
+	func consent() async throws {
+		let fake = FakeGroupRelay()
+		let a = try await session(alice, leg: 0, relay: fake, roster: roster())
+		try await a.start()
+
+		let transaction = Data(repeating: 7, count: 12)
+		await fake.deliver(to: 0, CallSTUN.encode(type: CallSTUN.bindingRequest, transactionID: transaction))
+		try await Task.sleep(for: .milliseconds(100))
+
+		#expect(await a.consentRequestsAnswered == 1)
+		let answer = await fake.bindingAnswers.first
+		#expect(answer.flatMap(CallSTUN.transactionID) == transaction)
+		await a.stop()
+	}
+
+	@Test("media keeps going while a new allocation waits for its answer")
+	func keepsSendingThroughReallocation() async throws {
+		let fake = FakeGroupRelay()
+		let a = try await session(alice, leg: 0, relay: fake, roster: roster())
+		try await a.start()
+		try await a.applyGroupEpoch(GroupCallEpoch(transactionID: 1, key: key))
+
+		await fake.stopAnswering()
+		var moved = roster(transaction: 2)
+		moved.relay = CallRelayData.parse(relay: BinaryNode(
+			tag: "relay",
+			attrs: ["transaction-id": "2", "warp_mi_tag_len": "4"],
+			content: .nodes([
+				BinaryNode(tag: "key", content: .data(Data("another-key".utf8))),
+				BinaryNode(tag: "token", attrs: ["id": "0"], content: .data(Data("another-token".utf8))),
+				BinaryNode(
+					tag: "te2",
+					attrs: ["relay_id": "1", "token_id": "0", "auth_token_id": "0", "relay_name": "gru"],
+					content: .data(Data([10, 0, 0, 1, 0x0d, 0x98]))
+				)
+			])
+		))
+		try await a.applyGroupUpdate(moved)
+
+		try await a.sendAudio(tone())
+		#expect(await a.framesSent == 1)
 		await a.stop()
 	}
 

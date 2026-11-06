@@ -75,6 +75,9 @@ extension WhatsAppClient {
 		}
 
 		let groupSnapshot = status == .offer ? admitGroupOffer(infoChild, callID: callID, creator: from) : nil
+		if status == .offer || status == .preaccept || status == .accept {
+			noteCallCapability(in: infoChild, sender: sender, callID: callID, creator: from)
+		}
 		let call = WhatsAppCallEvent(
 			chatID: chatID,
 			from: from,

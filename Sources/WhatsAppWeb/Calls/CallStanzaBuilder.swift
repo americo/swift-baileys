@@ -269,7 +269,8 @@ public enum CallStanzaBuilder {
 		stanzaID: String,
 		state: CallVideoState,
 		decoders: String? = nil,
-		deviceOrientation: String? = nil
+		deviceOrientation: String? = nil,
+		transactionID: UInt32? = nil
 	) -> BinaryNode {
 		wrap(to: to, stanzaID: stanzaID, action: BinaryNode(
 			tag: "video",
@@ -279,7 +280,8 @@ public enum CallStanzaBuilder {
 				("state", String(state.rawValue)),
 				("dec", decoders),
 				("voip_settings", state == .upgradeRequestV2 ? "video" : nil),
-				("device_orientation", deviceOrientation)
+				("device_orientation", deviceOrientation),
+				("transaction-id", transactionID.map(String.init))
 			])
 		))
 	}
@@ -312,7 +314,8 @@ public enum CallStanzaBuilder {
 		latencyMs: Int,
 		relayName: String,
 		relayAddress: Data,
-		devices: [String]
+		devices: [String],
+		transactionID: UInt32? = nil
 	) -> BinaryNode {
 		var children = [BinaryNode(
 			tag: "te",
@@ -326,7 +329,15 @@ public enum CallStanzaBuilder {
 			))
 		}
 
-		return wrap(to: to, stanzaID: stanzaID, action: action("relaylatency", callID, callCreator, children))
+		return wrap(to: to, stanzaID: stanzaID, action: BinaryNode(
+			tag: "relaylatency",
+			attrs: BinaryNodeAttributes.trimmingUndefined([
+				("call-id", callID),
+				("call-creator", callCreator),
+				("transaction-id", transactionID.map(String.init))
+			]),
+			content: .nodes(children)
+		))
 	}
 
 	// MARK: Group calls
@@ -344,15 +355,7 @@ public enum CallStanzaBuilder {
 	) -> BinaryNode {
 		var children = [audioNode(audioRate)]
 		if video {
-			// The group shape: its decoder names and geometry differ from a 1:1 offer's on purpose.
-			children.append(BinaryNode(tag: "video", attrs: BinaryNodeAttributes([
-				("enc", "h264"),
-				("dec", "h264"),
-				("orientation", "0"),
-				("screen_width", "1920"),
-				("screen_height", "1080"),
-				("device_orientation", uprightOrientation)
-			])))
+			children.append(groupVideoNode)
 		}
 		children.append(BinaryNode(tag: "net", attrs: ["medium": "3"]))
 		children.append(BinaryNode(tag: "group_info", content: .nodes(participants.map(groupUserNode))))
@@ -370,6 +373,44 @@ public enum CallStanzaBuilder {
 				content: .nodes(children)
 			)
 		)
+	}
+
+	/// `<offer>` asking someone into a call already in progress, sent to them: audio → [video] → net →
+	/// destination → group_info. On a 1:1 call it is also what makes it a group call. It names who is in
+	/// the call, with their capabilities as they stated them. The key follows by `enc_rekey`.
+	public static func groupInviteOffer(
+		callID: String,
+		to: String,
+		callCreator: String,
+		stanzaID: String,
+		targetDevices: [String],
+		participants: [GroupCallParticipant],
+		audioRate: String = "16000",
+		video: Bool = false
+	) -> BinaryNode {
+		var children = [audioNode(audioRate)]
+		if video {
+			children.append(groupVideoNode)
+		}
+		children.append(BinaryNode(tag: "net", attrs: ["medium": "2"]))
+		children.append(BinaryNode(
+			tag: "destination",
+			content: .nodes(targetDevices.map { BinaryNode(tag: "to", attrs: ["jid": $0]) })
+		))
+		children.append(BinaryNode(tag: "group_info", content: .nodes(participants.map(groupUserNode))))
+		return wrap(to: to, stanzaID: stanzaID, action: action("offer", callID, callCreator, children))
+	}
+
+	/// The group shape: its decoder names and geometry differ from a 1:1 offer's on purpose.
+	private static var groupVideoNode: BinaryNode {
+		BinaryNode(tag: "video", attrs: BinaryNodeAttributes([
+			("enc", "h264"),
+			("dec", "h264"),
+			("orientation", "0"),
+			("screen_width", "1920"),
+			("screen_height", "1080"),
+			("device_orientation", uprightOrientation)
+		]))
 	}
 
 	/// `<enc_rekey>`: one shared media key, encrypted for one device.
