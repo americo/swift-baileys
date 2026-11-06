@@ -113,7 +113,7 @@ public actor WhatsAppClient {
 	let messageIDGenerator: MessageIDGenerator
 	private let transportFactory: @Sendable (URL) -> any WhatsAppWebSocketTransport
 	let requestCoordinator = IQRequestCoordinator()
-	private var transport: (any WhatsAppWebSocketTransport)?
+	var transport: (any WhatsAppWebSocketTransport)?
 	private var receiveTask: Task<Void, Never>?
 	/// Last frame handed to the socket. See `sendInOrder`.
 	private var lastOutboundFrame: Task<Void, Error>?

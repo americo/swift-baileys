@@ -259,6 +259,20 @@ extension GroupCallUpdate {
 		return update
 	}
 
+	/// The roster in the ack of a `<lobby>`, which need not name the call again. `nil` when it has none.
+	public static func parse(lobbyAck node: BinaryNode, callID: String, callCreator: String) throws -> GroupCallUpdate? {
+		guard let info = node.firstChild(named: "group_info") else {
+			return nil
+		}
+
+		return try parseInfo(
+			info,
+			callID: info.attrs["call-id"] ?? callID,
+			creator: info.attrs["call-creator"] ?? callCreator,
+			isPartial: true
+		)
+	}
+
 	private static func parseInfo(
 		_ node: BinaryNode,
 		callID: String,

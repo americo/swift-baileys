@@ -277,29 +277,102 @@ extension WhatsAppClient {
 
 	/// Goes back into a group call this device left, while the others are still in it.
 	///
-	/// A device that has left stays on the roster as `invited`, so this answers the way an invitation is
-	/// answered. The answer brings a roster with a new relay, and a key by `.groupEpoch`, as in
+	/// As the official client does, this sends `<lobby>` where an answer to a ringing call has `<preaccept>`,
+	/// and then `<accept>`. Nothing rang here, so what a ringing call's offer gives comes in their acks: the
+	/// roster in the lobby's, and the relay in the accept's. The key comes by `.groupEpoch`, as in
 	/// `answerGroupCall`. What this device held from before does not apply to its return.
 	public func rejoinGroupCall(id callID: String, callCreator: String, video: Bool) async throws {
-		groupCalls[callID]?.state.dropRelay()
-		groupCalls[callID]?.epochs = []
-		groupCalls[callID]?.keyInFlight = nil
+		var record = groupCalls[callID] ?? GroupCallRecord(state: GroupCallState(callID: callID, callCreator: callCreator))
+		record.state.dropRelay()
+		record.epochs = []
+		record.keyInFlight = nil
+		storeGroupCallRecord(record, for: callID)
 
 		let scope = groupCallScope(callID: callID)
-		try await sendNode(CallStanzaBuilder.preaccept(
+		try await enterGroupCallLobby(callID: callID, callCreator: callCreator, scope: scope)
+
+		let ack: BinaryNode
+		do {
+			ack = try await query(CallStanzaBuilder.accept(
+				callID: callID,
+				to: scope,
+				callCreator: callCreator,
+				stanzaID: messageIDGenerator.generate(),
+				video: video
+			), timeout: .seconds(15))
+		} catch let error as BinaryNodeServerError {
+			throw Self.rejoinRefusal(code: error.code.map(String.init) ?? "unknown")
+		}
+		if let error = ack.attrs["error"], !["", "0", "207"].contains(error) {
+			throw Self.rejoinRefusal(code: error)
+		}
+
+		let relay = CallRelayData.parse(fromAck: ack)
+		WhatsAppLog.logger.notice("group call \(callID, privacy: .public): accept ack relay=\(relay == nil ? "none" : "yes", privacy: .public) children=\(Self.childTags(of: ack), privacy: .public)")
+		groupCalls[callID]?.state.adoptRelayIfMissing(relay)
+	}
+
+	/// Sends `<lobby>` and takes the roster from its ack. The official client can accept before this ack
+	/// comes, so one that never comes does not stop the return.
+	private func enterGroupCallLobby(callID: String, callCreator: String, scope: String) async throws {
+		let ack: BinaryNode
+		do {
+			ack = try await query(CallStanzaBuilder.lobby(
+				callID: callID,
+				to: scope,
+				callCreator: callCreator,
+				stanzaID: messageIDGenerator.generate()
+			), timeout: .seconds(8))
+		} catch IQRequestCoordinatorError.timeout {
+			WhatsAppLog.logger.notice("group call \(callID, privacy: .public): no lobby ack, accepting anyway")
+			return
+		} catch let error as BinaryNodeServerError {
+			// Not an end for the official client either, though nothing says what it means.
+			guard error.code == 462 else {
+				throw Self.rejoinRefusal(code: error.code.map(String.init) ?? "unknown")
+			}
+			return
+		}
+
+		let status = ack.attrs["error"] ?? ""
+		WhatsAppLog.logger.notice("group call \(callID, privacy: .public): lobby ack error=\(status, privacy: .public) children=\(Self.childTags(of: ack), privacy: .public)")
+		if !["", "0", "462"].contains(status) {
+			throw Self.rejoinRefusal(code: status)
+		}
+
+		do {
+			guard let roster = try GroupCallUpdate.parse(lobbyAck: ack, callID: callID, callCreator: callCreator) else {
+				return
+			}
+			let applied = groupCalls[callID]?.state.applyInitialOfferAck(roster)
+			WhatsAppLog.logger.notice("group call \(callID, privacy: .public): lobby roster \(roster.transactionID) \(applied.map { String(describing: $0) } ?? "-", privacy: .public)")
+		} catch {
+			// Rosters also come by `<group_update>`, so this one is not worth the way back.
+			WhatsAppLog.logger.error("group call \(callID, privacy: .public): unreadable lobby roster: \(String(describing: error), privacy: .public)")
+		}
+	}
+
+	/// 404 is the status of a call that is over.
+	private static func rejoinRefusal(code: String) -> WhatsAppVoiceCallError {
+		code == "404" ? .callOver : .rejoinRefused(code)
+	}
+
+	private static func childTags(of node: BinaryNode) -> String {
+		guard case let .nodes(children)? = node.content else {
+			return "-"
+		}
+
+		return children.map(\.tag).joined(separator: ",")
+	}
+
+	/// Says this device is still in a group call. Refusals come as errors.
+	public func sendGroupCallHeartbeat(callID: String, callCreator: String) async throws {
+		_ = try await query(CallStanzaBuilder.heartbeat(
 			callID: callID,
-			to: scope,
+			to: groupCallScope(callID: callID),
 			callCreator: callCreator,
-			stanzaID: messageIDGenerator.generate(),
-			video: video
-		))
-		try await sendNode(CallStanzaBuilder.accept(
-			callID: callID,
-			to: scope,
-			callCreator: callCreator,
-			stanzaID: messageIDGenerator.generate(),
-			video: video
-		))
+			stanzaID: messageIDGenerator.generate()
+		), timeout: .seconds(10))
 	}
 
 	// MARK: Media session

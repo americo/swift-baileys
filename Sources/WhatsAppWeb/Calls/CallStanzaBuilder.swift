@@ -507,6 +507,23 @@ public enum CallStanzaBuilder {
 		)
 	}
 
+	/// `<lobby>`: how a device comes back to a group call it left, in place of `<preaccept>`. The ack has
+	/// the call's roster.
+	public static func lobby(callID: String, to: String, callCreator: String, stanzaID: String) -> BinaryNode {
+		wrap(to: to, stanzaID: stanzaID, action: BinaryNode(
+			tag: "lobby",
+			attrs: ["call-id": callID, "call-creator": callCreator]
+		))
+	}
+
+	/// `<heartbeat>`: says, while in a group call, that this device is still there.
+	public static func heartbeat(callID: String, to: String, callCreator: String, stanzaID: String) -> BinaryNode {
+		wrap(to: to, stanzaID: stanzaID, action: BinaryNode(
+			tag: "heartbeat",
+			attrs: ["call-id": callID, "call-creator": callCreator]
+		))
+	}
+
 	private static func action(
 		_ tag: String,
 		_ callID: String,

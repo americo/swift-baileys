@@ -1115,6 +1115,164 @@ struct GroupCallSessionTests {
 
 // MARK: - Client
 
+private extension WhatsAppClient {
+	/// Skips the handshake: these tests answer by hand what would come over it.
+	func useTransport(_ transport: any WhatsAppWebSocketTransport) {
+		self.transport = transport
+	}
+}
+
+@Suite("Going back into a group call")
+struct GroupCallRejoinTests {
+	private struct Harness {
+		let transport = MockMessageSendWebSocketTransport()
+		let client: WhatsAppClient
+
+		init() async throws {
+			let transport = self.transport
+			client = WhatsAppClient(transportFactory: { _ in transport })
+			await client.useTransport(transport)
+		}
+
+		func sent(_ index: Int) async throws -> BinaryNode {
+			let frame = try await transport.waitForSentFrame(at: index)
+			var codec = NoiseFrameCodec()
+			return try BinaryNodeDecoder().decode(codec.decode(frame)[0])
+		}
+
+		func acknowledge(_ stanza: BinaryNode, attrs: [(String, String)] = [], children: [BinaryNode] = []) async throws {
+			let id = try #require(stanza.attrs["id"])
+			await client.handleIncomingNode(BinaryNode(
+				tag: "ack",
+				attrs: BinaryNodeAttributes([("id", id), ("class", "call"), ("from", "CALL@call")] + attrs),
+				content: children.isEmpty ? nil : .nodes(children)
+			))
+		}
+	}
+
+	private func relay(transaction: String = "21") -> BinaryNode {
+		BinaryNode(
+			tag: "relay",
+			attrs: ["transaction-id": transaction, "uuid": "u"],
+			content: .nodes([
+				BinaryNode(tag: "key", content: .data(Data(repeating: 1, count: 16))),
+				BinaryNode(tag: "hbh_key", content: .data(Data(repeating: 2, count: 30))),
+				BinaryNode(tag: "token", attrs: ["id": "0"], content: .data(Data([3]))),
+				BinaryNode(
+					tag: "te2",
+					attrs: ["relay_id": "0", "relay_name": "lis1", "token_id": "0", "protocol": "1"],
+					content: .data(Data([10, 0, 0, 1, 13, 136]))
+				)
+			])
+		)
+	}
+
+	private func roster(transaction: Int) -> BinaryNode {
+		BinaryNode(
+			tag: "group_info",
+			attrs: ["transaction-id": String(transaction), "connected-limit": "32", "media": "audio", "joinable": "1"],
+			content: .nodes([BinaryNode(
+				tag: "user",
+				attrs: ["jid": "100001@lid", "state": "connected"],
+				content: .nodes([BinaryNode(tag: "device", attrs: ["jid": "100001:1@lid", "pid": "1"])])
+			)])
+		)
+	}
+
+	@Test("a lobby goes where a preaccept would, and the acks bring the roster and the relay")
+	func lobbyThenAccept() async throws {
+		let harness = try await Harness()
+		let rejoin = Task {
+			try await harness.client.rejoinGroupCall(id: "CALL", callCreator: "100001:1@lid", video: false)
+		}
+
+		let lobby = try await harness.sent(0)
+		#expect(lobby.tag == "call")
+		#expect(lobby.attrs["to"] == "CALL@call")
+		let action = try #require(lobby.firstChild(named: "lobby"))
+		#expect(action.attrs["call-id"] == "CALL")
+		#expect(action.attrs["call-creator"] == "100001:1@lid")
+		try await harness.acknowledge(lobby, children: [roster(transaction: 20)])
+
+		let accept = try await harness.sent(1)
+		#expect(accept.attrs["to"] == "CALL@call")
+		#expect(accept.firstChild(named: "accept") != nil)
+		#expect(accept.firstChild(named: "preaccept") == nil)
+		try await harness.acknowledge(accept, children: [
+			BinaryNode(tag: "accept", attrs: ["call-id": "CALL", "call-creator": "100001:1@lid"]),
+			relay()
+		])
+
+		try await rejoin.value
+		let snapshot = try #require(await harness.client.groupCallSnapshot(id: "CALL"))
+		#expect(snapshot.transactionID == 20)
+		#expect(snapshot.relay != nil)
+	}
+
+	@Test("a relay from before does not stand in for the one the accept brings")
+	func oldRelayIsDropped() async throws {
+		let harness = try await Harness()
+		let update = try GroupCallUpdate.parse(groupUpdate: BinaryNode(
+			tag: "group_update",
+			attrs: ["call-id": "CALL", "call-creator": "100001:1@lid"],
+			content: .nodes([roster(transaction: 5), relay(transaction: "9")])
+		))
+		var state = GroupCallState(callID: "CALL", callCreator: "100001:1@lid")
+		#expect(state.apply(update) == .applied)
+		await harness.client.storeGroupCallRecord(GroupCallRecord(state: state), for: "CALL")
+
+		let rejoin = Task {
+			try await harness.client.rejoinGroupCall(id: "CALL", callCreator: "100001:1@lid", video: false)
+		}
+		let lobby = try await harness.sent(0)
+		#expect(await harness.client.groupCallSnapshot(id: "CALL")?.relay == nil)
+		try await harness.acknowledge(lobby)
+		let accept = try await harness.sent(1)
+		try await harness.acknowledge(accept, children: [relay(transaction: "1")])
+
+		try await rejoin.value
+		#expect(await harness.client.groupCallSnapshot(id: "CALL")?.relay?.transactionID == 1)
+	}
+
+	@Test("a call that is over says so, and nothing is accepted")
+	func callOver() async throws {
+		let harness = try await Harness()
+		let rejoin = Task {
+			try await harness.client.rejoinGroupCall(id: "CALL", callCreator: "100001:1@lid", video: false)
+		}
+		let lobby = try await harness.sent(0)
+		try await harness.acknowledge(lobby, attrs: [("error", "404")])
+
+		await #expect(throws: WhatsAppVoiceCallError.callOver) {
+			try await rejoin.value
+		}
+		#expect(await harness.transport.sentFrames.count == 1)
+	}
+
+	@Test("a refused accept stops the return")
+	func refusedAccept() async throws {
+		let harness = try await Harness()
+		let rejoin = Task {
+			try await harness.client.rejoinGroupCall(id: "CALL", callCreator: "100001:1@lid", video: false)
+		}
+		try await harness.acknowledge(try await harness.sent(0))
+		try await harness.acknowledge(try await harness.sent(1), attrs: [("error", "403")])
+
+		await #expect(throws: WhatsAppVoiceCallError.rejoinRefused("403")) {
+			try await rejoin.value
+		}
+	}
+
+	@Test("a heartbeat names the call and goes to its scope")
+	func heartbeat() {
+		let stanza = CallStanzaBuilder.heartbeat(callID: "CALL", to: "CALL@call", callCreator: "100001:1@lid", stanzaID: "s1")
+		#expect(stanza.attrs["to"] == "CALL@call")
+		#expect(stanza.firstChild(named: "heartbeat")?.attrs["call-id"] == "CALL")
+		#expect(stanza.firstChild(named: "heartbeat")?.attrs["call-creator"] == "100001:1@lid")
+		#expect(stanza.firstChild(named: "heartbeat")?.attrs["type"] == nil)
+	}
+}
+
 @Suite("Group call stanzas in the client")
 struct GroupCallClientTests {
 	private func client() -> WhatsAppClient {

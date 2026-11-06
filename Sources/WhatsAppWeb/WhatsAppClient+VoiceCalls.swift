@@ -13,6 +13,10 @@ public enum WhatsAppVoiceCallError: Error, Equatable, Sendable {
 	/// More members than a call holds, counting this device.
 	case groupTooLarge(Int)
 	case alreadyInCall
+	/// Going back into a call that has ended meanwhile.
+	case callOver
+	/// Going back into a call was refused, with this status.
+	case rejoinRefused(String)
 }
 
 /// An outgoing voice call whose `<offer>` was accepted by the server.
