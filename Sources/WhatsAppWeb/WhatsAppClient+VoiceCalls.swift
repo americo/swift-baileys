@@ -22,10 +22,12 @@ public struct WhatsAppOutgoingVoiceCall: Equatable, Sendable {
 	public let devices: [String]
 	/// The server's `<ack class="call" type="offer">`; it carries the relay allocation.
 	public let offerAck: BinaryNode
+	public let isVideo: Bool
 
 	public static func == (lhs: Self, rhs: Self) -> Bool {
 		lhs.callID == rhs.callID && lhs.peer == rhs.peer && lhs.callCreator == rhs.callCreator
 			&& lhs.callKey == rhs.callKey && lhs.devices == rhs.devices && lhs.offerAck == rhs.offerAck
+			&& lhs.isVideo == rhs.isVideo
 	}
 }
 
@@ -37,6 +39,11 @@ public struct WhatsAppIncomingVoiceCall: Equatable, Sendable {
 	public let callKey: Data
 	public let offer: BinaryNode
 
+	/// Whether the caller asked for video.
+	public var isVideo: Bool {
+		offer.firstChild(named: "video") != nil
+	}
+
 	public static func == (lhs: Self, rhs: Self) -> Bool {
 		lhs.callID == rhs.callID && lhs.callCreator == rhs.callCreator && lhs.chatID == rhs.chatID
 			&& lhs.callKey == rhs.callKey && lhs.offer == rhs.offer
@@ -46,11 +53,11 @@ public struct WhatsAppIncomingVoiceCall: Equatable, Sendable {
 extension WhatsAppClient {
 	// MARK: Outgoing
 
-	/// Places a 1:1 voice call: generates the call key, encrypts it for every device of `peer` and
-	/// sends the `<offer>`, waiting for the server's ack.
+	/// Places a 1:1 call: generates the call key, encrypts it for every device of `peer` and sends the
+	/// `<offer>`, waiting for the server's ack.
 	///
-	/// This only performs the signaling half of a call. Media (relay, SRTP, audio) is separate.
-	public func startVoiceCall(to requestedPeer: String) async throws -> WhatsAppOutgoingVoiceCall {
+	/// This only performs the signaling half of a call. Media (relay, SRTP, audio, video) is separate.
+	public func startVoiceCall(to requestedPeer: String, video: Bool = false) async throws -> WhatsAppOutgoingVoiceCall {
 		guard let me = authenticationState?.credentials.me else {
 			throw WhatsAppClientError.missingAuthenticatedUser
 		}
@@ -91,8 +98,10 @@ extension WhatsAppClient {
 			callCreator: callCreator,
 			stanzaID: stanzaID,
 			deviceKeys: deviceKeys,
+			capability: video ? CallCapability.standardOpusVideoOffer : CallCapability.standardOpusOffer,
 			deviceIdentity: deviceIdentity,
-			multiDevice: devices.count > 1
+			multiDevice: devices.count > 1,
+			video: video
 		)
 
 		let ack = try await query(offer, timeout: .seconds(20))
@@ -106,7 +115,8 @@ extension WhatsAppClient {
 			callCreator: callCreator,
 			callKey: callKey,
 			devices: devices,
-			offerAck: ack
+			offerAck: ack,
+			isVideo: video
 		)
 		await announceRelay(for: call)
 		return call
@@ -154,7 +164,8 @@ extension WhatsAppClient {
 			callID: call.callID,
 			to: call.chatID,
 			callCreator: call.callCreator,
-			stanzaID: messageIDGenerator.generate()
+			stanzaID: messageIDGenerator.generate(),
+			video: call.isVideo
 		))
 	}
 
@@ -171,7 +182,9 @@ extension WhatsAppClient {
 			callCreator: call.callCreator,
 			stanzaID: messageIDGenerator.generate(),
 			relayTransportEndpoint: relayTransportEndpoint,
-			routingToken: routingToken
+			routingToken: routingToken,
+			video: call.isVideo,
+			peerMetadata: call.isVideo ? CallPeerMetadata(offer: call.offer) : nil
 		))
 	}
 
@@ -231,6 +244,27 @@ extension WhatsAppClient {
 			to: sender,
 			callCreator: call.callCreator,
 			stanzaID: stanzaID
+		))
+	}
+
+	/// Sends a mid-call `<video>` stanza, which turns our direction on or off or negotiates an upgrade.
+	/// `to` is the device the call is with.
+	public func sendVideoState(
+		_ state: CallVideoState,
+		callID: String,
+		to: String,
+		callCreator: String
+	) async throws {
+		let announcesDecoder = state != .stopped && state != .upgradeReject && state != .upgradeCancel
+			&& state != .upgradeCancelByTimeout
+		try await sendNode(CallStanzaBuilder.videoState(
+			callID: callID,
+			to: to,
+			callCreator: callCreator,
+			stanzaID: messageIDGenerator.generate(),
+			state: state,
+			decoders: announcesDecoder ? CallStanzaBuilder.videoDecoders : nil,
+			deviceOrientation: announcesDecoder ? CallStanzaBuilder.uprightOrientation : nil
 		))
 	}
 

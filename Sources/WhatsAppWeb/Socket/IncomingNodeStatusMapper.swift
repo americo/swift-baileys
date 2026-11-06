@@ -32,6 +32,8 @@ public enum IncomingCallStatusMapper {
 			.reject
 		case "accept":
 			.accept
+		case "video":
+			.video
 		default:
 			.ringing
 		}
