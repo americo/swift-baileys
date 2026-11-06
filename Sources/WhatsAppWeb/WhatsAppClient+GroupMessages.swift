@@ -31,11 +31,17 @@ extension WhatsAppClient {
 
 		let metadata = try await groupMetadata(destinationJID)
 		var recipientDeviceJIDs: [String] = []
-		for participant in metadata.participants where !JID.areSameUser(participant.id, me) {
+		let meLID = authenticationState?.credentials.me?.lid
+		for participant in metadata.participants
+		where !OwnDeviceAddressing.isOwnUser(participant.id, localJID: me, localLID: meLID) {
 			recipientDeviceJIDs.append(contentsOf: try await messageDeviceResolver.deviceJIDs(
 				for: participant.id,
 				useCache: useUserDevicesCache
 			))
+		}
+		// Our other devices need the sender key too, or they cannot read what this device sends.
+		if !recipientDeviceJIDs.isEmpty {
+			recipientDeviceJIDs += await ownDeviceJIDsForFanOut(lidAddressed: metadata.addressingMode == .lid)
 		}
 
 		_ = try await signalSessionPreparer.assertSessions(for: recipientDeviceJIDs, force: false)
