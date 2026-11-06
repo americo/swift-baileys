@@ -108,6 +108,11 @@ public actor CallSession {
 	private let peerSilenceTimeout: Duration
 	private var lastPeerActivity: ContinuousClock.Instant?
 	private var watchdogTask: Task<Void, Never>?
+	/// What has arrived since the last media log, before any of it is authenticated.
+	private var arrivedByPayloadType: [UInt8: Int] = [:]
+	private var rtcpArrived = 0
+	private var rtcpAccepted = 0
+	private var lastMediaLog: ContinuousClock.Instant?
 	private let configuration: Configuration
 	private let link: any CallRelayLink
 	private let relayToken: Data
@@ -522,6 +527,7 @@ public actor CallSession {
 			return
 		}
 
+		arrivedByPayloadType[header.payloadType, default: 0] += 1
 		if header.payloadType == CallVideoRTPHeader.h264PayloadType {
 			await handleVideoPacket(message)
 		} else if CallRTPHeader.isAudioPayloadType(header.payloadType) {
@@ -625,6 +631,7 @@ public actor CallSession {
 	}
 
 	private func handleRTCP(_ message: Data) async {
+		rtcpArrived += 1
 		guard message.count >= 8 else {
 			return
 		}
@@ -638,6 +645,7 @@ public actor CallSession {
 		}
 
 		lastPeerActivity = clock.now
+		rtcpAccepted += 1
 		for timing in summary.senderTimings {
 			reception.observeSenderReport(ssrc: timing.ssrc, compactNTP: timing.compactNTP, arrivalMs: monotonicMs())
 		}
@@ -759,9 +767,34 @@ public actor CallSession {
 		await stop()
 	}
 
+	/// What the peer has been sending, every few seconds, by RTP payload type. Tells a peer that stopped
+	/// sending apart from one whose packets this client does not use.
+	private func logMediaArrivals() {
+		guard isRunning else {
+			return
+		}
+
+		let now = clock.now
+		guard let last = lastMediaLog else {
+			lastMediaLog = now
+			return
+		}
+		guard last.duration(to: now) >= .seconds(5) else {
+			return
+		}
+
+		let rtp = arrivedByPayloadType.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }.joined(separator: ",")
+		WhatsAppLog.logger.notice("call \(self.configuration.callID, privacy: .public): arrived rtp[\(rtp, privacy: .public)] rtcp=\(self.rtcpArrived)/\(self.rtcpAccepted) frames video=\(self.videoFramesReceived) audio=\(self.framesReceived) carried=\(self.carriedAudioPackets) rejected=\(self.videoPacketsRejected)/\(self.packetsRejected) sentVideo=\(self.videoFramesSent)")
+		arrivedByPayloadType = [:]
+		rtcpArrived = 0
+		rtcpAccepted = 0
+		lastMediaLog = now
+	}
+
 	/// Only authenticated traffic counts, so nothing but the peer can keep a call alive. A call that
 	/// has not heard from the peer yet waits, since media can take a moment to start.
 	private func checkPeerActivity() {
+		logMediaArrivals()
 		guard isRunning, let last = lastPeerActivity, last.duration(to: clock.now) >= peerSilenceTimeout else {
 			return
 		}
