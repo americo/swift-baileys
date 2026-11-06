@@ -6,7 +6,7 @@ public enum MediaDecryption {
 		mediaKey: Data,
 		mediaType: MediaType,
 		expectedFileEncSHA256: Data,
-		expectedFileSHA256: Data
+		expectedFileSHA256: Data?
 	) throws -> Data {
 		guard CryptoDigest.sha256(encryptedFile) == expectedFileEncSHA256 else {
 			throw MediaDecryptionError.fileEncSHA256Mismatch
@@ -30,7 +30,7 @@ public enum MediaDecryption {
 		} catch AESCBCipherError.cryptFailed(let status) {
 			throw MediaDecryptionError.aesCBCDecryptionFailed(status)
 		}
-		guard CryptoDigest.sha256(plaintext) == expectedFileSHA256 else {
+		if let expectedFileSHA256, CryptoDigest.sha256(plaintext) != expectedFileSHA256 {
 			throw MediaDecryptionError.fileSHA256Mismatch
 		}
 

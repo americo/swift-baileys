@@ -68,6 +68,7 @@ public enum WhatsAppClientEvent: Equatable, Sendable {
 	case labelEdited(LabelUpdate)
 	case labelAssociationUpdated(LabelAssociationUpdate)
 	case settingsUpdated(SettingsUpdate)
+	case favoriteStickerUpdated(FavoriteStickerUpdate)
 	case newsletterReactionUpdated(NewsletterReactionUpdate)
 	case newsletterViewUpdated(NewsletterViewUpdate)
 	case newsletterParticipantsUpdated(NewsletterParticipantUpdate)
@@ -99,6 +100,7 @@ public actor WhatsAppClient {
 	var signedPreKeySigner: (any SignalSignedPreKeySigning)?
 	var eventResponseContextResolver: (any EventResponseContextResolving)?
 	var pollVoteContextResolver: (any PollVoteContextResolving)?
+	var messageSecretResolver: (any MessageSecretResolving)?
 	var linkPreviewResolver: (any LinkPreviewResolving)?
 	var mediaUploader: (any WhatsAppMediaUploading)?
 	let mediaDownloader: WhatsAppMediaDownloader
@@ -126,6 +128,7 @@ public actor WhatsAppClient {
 	var serverProps = WhatsAppServerProps()
 	var inFlightTrustedContactTokenIssues: Set<String> = []
 	var blockedAppStateSyncCollections: Set<AppStateCollectionName> = []
+	var appStateWorkTail: Task<Void, Never>?
 	var appStateKeyExpander: (any AppStateKeyExpanding)?
 	var appStateHashMixer: (any AppStatePatchHashMixing)?
 	var appStateRandomBytes: (@Sendable (Int) throws -> Data)?
@@ -748,6 +751,7 @@ public enum WhatsAppClientError: Error, Equatable, Sendable {
 	case missingAppStateKeyID
 	case invalidAppStateKeyID
 	case missingAppStateSyncKey
+	case appStatePatchRejected(collection: String, code: String?)
 	case invalidBlocklistJID(String)
 	case missingLIDMappingForPN(String)
 	case missingPNMappingForLID(String)

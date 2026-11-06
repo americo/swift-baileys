@@ -64,7 +64,7 @@ public struct SignalGroupMessageDecryptionRequest: Equatable, Sendable {
 	public let authorAddress: SignalProtocolAddress
 
 	public init(groupJID: String, authorJID: String, ciphertext: Data) throws {
-		guard groupJID.isGroupJID else {
+		guard groupJID.isGroupJID || groupJID.isStatusBroadcastJID else {
 			throw SignalMessageDecryptionRequestValidationError.invalidGroupJID
 		}
 		guard !ciphertext.isEmpty else {
@@ -91,7 +91,7 @@ public struct SenderKeyDistributionMessageRequest: Equatable, Sendable {
 		senderKeyDistributionData: Data? = nil,
 		messageData: Data
 	) throws {
-		if let groupJID, !groupJID.isGroupJID {
+		if let groupJID, !(groupJID.isGroupJID || groupJID.isStatusBroadcastJID) {
 			throw SignalMessageDecryptionRequestValidationError.invalidGroupJID
 		}
 		guard !messageData.isEmpty else {
@@ -157,7 +157,7 @@ struct SignalIncomingMessageDecryptor: IncomingMessageDecrypting {
 			return nil
 		}
 		let authorJID = node.attrs["participant"] ?? node.attrs["from"]
-		let groupJID = node.attrs["from"].flatMap { $0.isGroupJID ? $0 : nil }
+		let groupJID = node.attrs["from"].flatMap { $0.isGroupJID || $0.isStatusBroadcastJID ? $0 : nil }
 
 		if let plaintext = firstContentData(in: node, tag: "plaintext") {
 			let message = try unwrapDeviceSentMessage(Proto_Message(serializedBytes: plaintext))
@@ -165,15 +165,33 @@ struct SignalIncomingMessageDecryptor: IncomingMessageDecrypting {
 			return message
 		}
 
-		guard let encryptedNode = node.firstChild(named: "enc"),
-			  let ciphertext = encryptedNode.dataContent,
-			  let type = encryptedNode.attrs["type"] else {
-			return nil
+		// A stanza can carry several `enc` children: a `pkmsg` with only the sender key distribution,
+		// then the `skmsg` with the content. Process them in order and keep the first with content.
+		var fallback: Proto_Message?
+		for encryptedNode in node.children(named: "enc") {
+			guard let ciphertext = encryptedNode.dataContent,
+				  let type = encryptedNode.attrs["type"] else {
+				continue
+			}
+			guard !ciphertext.isEmpty else {
+				throw SignalIncomingMessageDecryptorError.emptyCiphertext
+			}
+			guard let message = try await decryptEncryptedNode(type: type, ciphertext: ciphertext, node: node, authorJID: authorJID, groupJID: groupJID) else {
+				continue
+			}
+			if ReceivedMessageContentParser.parse(message) != nil { return message }
+			fallback = message
 		}
-		guard !ciphertext.isEmpty else {
-			throw SignalIncomingMessageDecryptorError.emptyCiphertext
-		}
+		return fallback
+	}
 
+	private func decryptEncryptedNode(
+		type: String,
+		ciphertext: Data,
+		node: BinaryNode,
+		authorJID: String?,
+		groupJID: String?
+	) async throws -> Proto_Message? {
 		let decrypted: Data
 		if type == "skmsg" {
 			guard let group = node.attrs["from"], let authorJID = node.attrs["participant"] else {

@@ -519,11 +519,14 @@ extension WhatsAppClient {
 			)
 		}
 
-		let recipientDeviceJIDs = try await getUSyncDevices(
+		let devices = try await getUSyncDevices(
 			[destinationJID],
 			useCache: useUserDevicesCache,
 			ignoreZeroDevices: false
-		).map(\.jid)
+		)
+		// Peer requests are for the primary phone: it is the only device that can answer them.
+		let primaryDevices = additionalAttributes["category"] == "peer" ? devices.filter { $0.device == 0 } : []
+		let recipientDeviceJIDs = (primaryDevices.isEmpty ? devices : primaryDevices).map(\.jid)
 		guard let signalSessionPreparer else {
 			throw WhatsAppClientError.missingSignalSessionPreparer
 		}

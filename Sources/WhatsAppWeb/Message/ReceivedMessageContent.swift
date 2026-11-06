@@ -1,5 +1,16 @@
 import Foundation
 
+/// How a text message is drawn: status updates carry a background and text colour.
+public struct ReceivedTextStyle: Equatable, Sendable {
+	public let backgroundARGB: UInt32?
+	public let textARGB: UInt32?
+
+	public init(backgroundARGB: UInt32?, textARGB: UInt32?) {
+		self.backgroundARGB = backgroundARGB
+		self.textARGB = textARGB
+	}
+}
+
 public struct ReceivedMessage: Equatable, Sendable {
 	public let id: String
 	public let from: String?
@@ -16,6 +27,12 @@ public struct ReceivedMessage: Equatable, Sendable {
 	/// Reactions stored on the message itself (`WebMessageInfo.reactions`), as history sync delivers them.
 	/// Each `key` identifies the reaction's author; the reacted-to message is this one.
 	public let reactions: [ReceivedReactionContent]
+	/// Starred on this account (`WebMessageInfo.starred`), as history sync delivers it.
+	public let starred: Bool
+	/// Background and text colour of an extended text message (set on text status updates).
+	public let textStyle: ReceivedTextStyle?
+	/// Sent as a view once message (photo, video or voice note that opens a single time).
+	public let isViewOnce: Bool
 
 	public init(
 		id: String,
@@ -29,7 +46,10 @@ public struct ReceivedMessage: Equatable, Sendable {
 		pushName: String? = nil,
 		stub: ReceivedMessageStubContent? = nil,
 		messageSecret: Data? = nil,
-		reactions: [ReceivedReactionContent] = []
+		reactions: [ReceivedReactionContent] = [],
+		starred: Bool = false,
+		textStyle: ReceivedTextStyle? = nil,
+		isViewOnce: Bool = false
 	) {
 		self.id = id
 		self.from = from
@@ -43,6 +63,9 @@ public struct ReceivedMessage: Equatable, Sendable {
 		self.stub = stub
 		self.messageSecret = messageSecret
 		self.reactions = reactions
+		self.starred = starred
+		self.textStyle = textStyle
+		self.isViewOnce = isViewOnce
 	}
 }
 

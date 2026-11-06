@@ -114,6 +114,24 @@ public actor FileSignalKeyStore: SignalKeyStore {
 		}
 	}
 
+	/// The ids stored for a category, read back from the file names.
+	public func storedIDs(_ category: SignalKeyCategory) -> [String] {
+		let prefix = "\(category.rawValue)-"
+		let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+		return names.compactMap { name -> String? in
+			guard name.hasPrefix(prefix), name.hasSuffix(".json") else {
+				return nil
+			}
+			let stem = String(name.dropFirst(prefix.count).dropLast(".json".count))
+			var base64 = stem.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+			base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
+			if let data = Data(base64Encoded: base64), let id = String(data: data, encoding: .utf8) {
+				return id
+			}
+			return stem.replacingOccurrences(of: "__", with: "/")
+		}
+	}
+
 	private func fileURL(category: SignalKeyCategory, id: String) -> URL {
 		directory.appendingPathComponent("\(category.rawValue)-\(encodedFileName(id)).json")
 	}

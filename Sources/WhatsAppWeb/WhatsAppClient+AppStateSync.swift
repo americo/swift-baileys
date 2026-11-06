@@ -41,6 +41,12 @@ public extension WhatsAppClient {
 
 		if !storedKeys.isEmpty {
 			try await authenticationState.keys.set([.appStateSyncKey: storedKeys])
+			// New patches are encrypted with the most recent key the phone shared.
+			if let latestKeyID = latestAppStateKeyID(in: share) {
+				try await updateCredentials { credentials in
+					credentials.myAppStateKeyID = latestKeyID
+				}
+			}
 			retryBlockedAppStateSyncCollections()
 		}
 	}
@@ -91,13 +97,13 @@ public extension WhatsAppClient {
 		collections: [AppStateCollectionName] = AppStateCollectionName.allCases,
 		forceSnapshot: Bool = false
 	) async throws -> AppStateSyncResult {
-		try await syncAppState(
-			collections: collections,
-			forceSnapshot: forceSnapshot,
-			downloadExternalBlob: { [mediaDownloader] reference in
-				try await mediaDownloader.download(appStateExternalBlobDownloadRequest(reference))
-			}
-		)
+		try await serializeAppStateWork { [self] in
+			try await syncAppState(
+				collections: collections,
+				forceSnapshot: forceSnapshot,
+				downloadExternalBlob: appStateExternalBlobDownloader()
+			)
+		}
 	}
 }
 
@@ -136,6 +142,105 @@ func appStateExternalBlobDownloadRequest(_ reference: Proto_ExternalBlobReferenc
 }
 
 extension WhatsAppClient {
+	func appStateExternalBlobDownloader() -> AppStateExternalBlobDownloader {
+		{ [mediaDownloader] reference in
+			try await mediaDownloader.download(appStateExternalBlobDownloadRequest(reference))
+		}
+	}
+
+	/// Syncs and patches both build on a collection's stored version, so they run one at a time.
+	func serializeAppStateWork<T: Sendable>(
+		_ work: @escaping @Sendable () async throws -> T
+	) async throws -> T {
+		let previous = appStateWorkTail
+		let task = Task<T, any Error> {
+			await previous?.value
+			return try await work()
+		}
+		appStateWorkTail = Task { _ = await task.result }
+		return try await task.value
+	}
+
+	/// Accounts linked before the key id was recorded still hold the keys the phone shared.
+	/// Picks the most recent of them. Returns whether a key id is known afterwards.
+	@discardableResult
+	public func adoptStoredAppStateKey(ids: [String]) async throws -> Bool {
+		guard let authenticationState else {
+			throw WhatsAppClientError.missingAuthenticationState
+		}
+		if authenticationState.credentials.myAppStateKeyID != nil {
+			return true
+		}
+		let stored = try await authenticationState.keys.get(.appStateSyncKey, ids: ids)
+		var latest: (id: String, timestamp: Int64)?
+		for (id, data) in stored {
+			guard Data(base64Encoded: id) != nil,
+				  let key = try? Proto_Message.AppStateSyncKeyData(serializedBytes: data) else {
+				continue
+			}
+			if key.timestamp >= (latest?.timestamp ?? .min) {
+				latest = (id, key.timestamp)
+			}
+		}
+		guard let latest else {
+			return false
+		}
+		try await updateCredentials { credentials in
+			credentials.myAppStateKeyID = latest.id
+		}
+		return true
+	}
+
+	func requestAppStateSyncKeys(ids: [Data]) async throws {
+		guard !ids.isEmpty, let meJID = authenticationState?.credentials.me?.id else {
+			return
+		}
+		var request = Proto_Message.AppStateSyncKeyRequest()
+		request.keyIds = ids.map { id in
+			var keyID = Proto_Message.AppStateSyncKeyId()
+			keyID.keyID = id
+			return keyID
+		}
+		var protocolMessage = Proto_Message.ProtocolMessageMessage()
+		protocolMessage.appStateSyncKeyRequest = request
+		protocolMessage.type = .appStateSyncKeyRequest
+		var message = Proto_Message()
+		message.protocolMessage = protocolMessage
+		_ = try await sendResolvedMessage(
+			to: JID(meJID)?.normalizedUser ?? meJID,
+			message: message,
+			messageID: nil,
+			additionalAttributes: ["category": "peer", "push_priority": "high_force"],
+			additionalNodes: [BinaryNode(tag: "meta", attrs: ["appdata": "default"])]
+		)
+		WhatsAppLog.logger.notice("app state keys requested count=\(ids.count)")
+	}
+
+	private func latestAppStateKeyID(in share: ReceivedAppStateSyncKeyShareContent) -> String? {
+		var latest: (id: String, timestamp: Int64)?
+		for key in share.keys where key.keyData != nil {
+			guard let id = key.keyIDBase64 ?? key.keyID?.base64EncodedString() else {
+				continue
+			}
+			let timestamp = key.timestamp ?? 0
+			if timestamp >= (latest?.timestamp ?? .min) {
+				latest = (id, timestamp)
+			}
+		}
+		return latest?.id
+	}
+
+	/// Accounts linked before the key id was recorded only learn it from what the server sends.
+	private func rememberAppStateKeyIDIfMissing(_ keyID: Data?) async throws {
+		guard authenticationState?.credentials.myAppStateKeyID == nil,
+			  let keyID, !keyID.isEmpty else {
+			return
+		}
+		try await updateCredentials { credentials in
+			credentials.myAppStateKeyID = keyID.base64EncodedString()
+		}
+	}
+
 	func syncAppState(
 		collections: [AppStateCollectionName],
 		forceSnapshot: Bool,
@@ -152,6 +257,7 @@ extension WhatsAppClient {
 		var invalidSnapshotMACCollections: [String] = []
 		var attempts: [AppStateCollectionName: Int] = [:]
 		var forceSnapshotCollections = Set<AppStateCollectionName>()
+		var missingKeyIDs = Set<String>()
 
 		while !pending.isEmpty {
 			let requestedCollections = collections.filter { pending.contains($0) }
@@ -160,6 +266,11 @@ extension WhatsAppClient {
 				forceSnapshot: forceSnapshot && versions.isEmpty,
 				forceSnapshotCollections: forceSnapshotCollections
 			)
+			for node in result.firstChild(named: "sync")?.children(named: "collection") ?? [] {
+				let error = node.firstChild(named: "error")?.attrs["code"] ?? "-"
+				let children = node.children(named: "patches").count + node.children(named: "patch").count
+				WhatsAppLog.logger.notice("app state answer \(node.attrs["name"] ?? "?", privacy: .public) version=\(node.attrs["version"] ?? "-", privacy: .public) type=\(node.attrs["type"] ?? "-", privacy: .public) error=\(error, privacy: .public) snapshot=\(node.firstChild(named: "snapshot") != nil) patches=\(children)")
+			}
 			let extracted = try await AppStateSyncExtractor.extract(
 				from: result,
 				downloadExternalBlob: downloadExternalBlob
@@ -182,7 +293,8 @@ extension WhatsAppClient {
 						)
 						state = decodedSnapshot.state
 						decodedMutationCount += decodedSnapshot.mutations.count
-						try await emitAppStateMutationEvents(decodedSnapshot.mutations)
+						try await emitAppStateMutationEvents(decodedSnapshot.mutations, fromSnapshot: true)
+						try await rememberAppStateKeyIDIfMissing(snapshot.keyID.id)
 						if !decodedSnapshot.snapshotMACValid {
 							invalidSnapshotMACCollections.append(collection.rawValue)
 						}
@@ -200,8 +312,13 @@ extension WhatsAppClient {
 						state = decodedPatch.state
 						decodedMutationCount += decodedPatch.mutations.count
 						try await emitAppStateMutationEvents(decodedPatch.mutations)
+						try await rememberAppStateKeyIDIfMissing(patch.keyID.id)
 					}
 				} catch {
+					WhatsAppLog.logger.error("app state \(collection.rawValue, privacy: .public) failed: \(String(describing: error), privacy: .public)")
+					if let keyID = AppStateSyncErrorPolicy.missingKeyID(error) {
+						missingKeyIDs.insert(keyID)
+					}
 					let attempt = (attempts[collection] ?? 0) + 1
 					attempts[collection] = attempt
 					if AppStateSyncErrorPolicy.isMissingKey(error) {
@@ -234,6 +351,15 @@ extension WhatsAppClient {
 			}
 		}
 
+		if !missingKeyIDs.isEmpty {
+			// The share sent while linking can be lost. The phone's answer resumes blocked collections.
+			do {
+				try await requestAppStateSyncKeys(ids: missingKeyIDs.compactMap { Data(base64Encoded: $0) })
+			} catch {
+				WhatsAppLog.logger.error("app state key request failed: \(String(describing: error), privacy: .public)")
+			}
+		}
+
 		return AppStateSyncResult(
 			collectionVersions: versions,
 			hasMorePatches: hasMorePatches,
@@ -254,13 +380,22 @@ extension WhatsAppClient {
 		}
 	}
 
-	private func emitAppStateMutationEvents(_ mutations: [AppStateDecodedMutation]) async throws {
+	/// A snapshot holds the last action of every index, however old. Replaying a deletion or a
+	/// "read" from it could hit messages and unread counts that arrived after that action.
+	private func emitAppStateMutationEvents(
+		_ mutations: [AppStateDecodedMutation],
+		fromSnapshot: Bool = false
+	) async throws {
 		for mutation in mutations {
 			let action = mutation.syncAction.value
 			if action.hasMuteAction, mutation.index.count > 1 {
 				let mute = action.muteAction
 				eventContinuation.yield(.chatsUpdated([
-					ChatUpdate(id: mutation.index[1], muteEndTime: mute.muted ? mute.muteEndTimestamp : nil)
+					ChatUpdate(
+						id: mutation.index[1],
+						muteEndTime: mute.muted ? mute.muteEndTimestamp : nil,
+						isMuted: mute.muted
+					)
 				]))
 			} else if (action.hasArchiveChatAction || mutation.index.first == "archive" || mutation.index.first == "unarchive"),
 					  mutation.index.count > 1 {
@@ -271,15 +406,25 @@ extension WhatsAppClient {
 					)
 				]))
 			} else if action.hasMarkChatAsReadAction, mutation.index.count > 1 {
+				if fromSnapshot, action.markChatAsReadAction.read {
+					continue
+				}
 				eventContinuation.yield(.chatsUpdated([
 					ChatUpdate(id: mutation.index[1], unreadCount: action.markChatAsReadAction.read ? 0 : -1)
 				]))
 			} else if action.hasPinAction, mutation.index.count > 1 {
 				eventContinuation.yield(.chatsUpdated([
-					ChatUpdate(id: mutation.index[1], pinned: action.pinAction.pinned ? action.timestamp : nil)
+					ChatUpdate(
+						id: mutation.index[1],
+						pinned: action.pinAction.pinned ? action.timestamp : nil,
+						isPinned: action.pinAction.pinned
+					)
 				]))
 			} else if (action.hasDeleteMessageForMeAction || mutation.index.first == "deleteMessageForMe"),
 					  mutation.index.count > 3 {
+				if fromSnapshot {
+					continue
+				}
 				eventContinuation.yield(.messagesDeleted(MessageDeleteUpdate(keys: [
 					WhatsAppMessageKey(
 						remoteJID: mutation.index[1],
@@ -303,6 +448,9 @@ extension WhatsAppClient {
 				]))
 			} else if (action.hasDeleteChatAction || mutation.index.first == "deleteChat"),
 					  mutation.index.count > 1 {
+				if fromSnapshot {
+					continue
+				}
 				eventContinuation.yield(.chatsDeleted(ChatDeleteUpdate(ids: [mutation.index[1]])))
 			} else if action.hasContactAction, mutation.index.count > 1 {
 				let contact = action.contactAction
@@ -355,6 +503,26 @@ extension WhatsAppClient {
 				)))
 			} else if action.hasLabelAssociationAction {
 				emitLabelAssociationUpdate(index: mutation.index, action: action.labelAssociationAction)
+			} else if action.hasStickerAction, mutation.index.count > 1 {
+				let sticker = action.stickerAction
+				eventContinuation.yield(.favoriteStickerUpdated(FavoriteStickerUpdate(
+					sticker: FavoriteSticker(
+						id: mutation.index[1],
+						url: sticker.url,
+						directPath: sticker.directPath,
+						mediaKey: sticker.mediaKey,
+						fileEncSHA256: sticker.fileEncSha256,
+						mimetype: sticker.mimetype,
+						width: sticker.width,
+						height: sticker.height,
+						fileLength: sticker.fileLength,
+						isFavorite: sticker.isFavorite,
+						isLottie: sticker.isLottie,
+						isAvatarSticker: sticker.isAvatarSticker,
+						timestamp: action.timestamp
+					),
+					removed: mutation.operation == .remove
+				)))
 			} else if action.hasPushNameSetting,
 					  action.pushNameSetting.hasName,
 					  authenticationState?.credentials.me?.name != action.pushNameSetting.name {

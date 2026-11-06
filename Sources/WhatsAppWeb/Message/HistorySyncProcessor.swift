@@ -81,6 +81,12 @@ public struct HistorySyncChat: Equatable, Sendable {
 	public let phoneNumber: String?
 	public let lastMessageReceivedTimestamp: UInt64?
 	public let latestMessage: ReceivedMessage?
+	public let isPinned: Bool?
+	public let isArchived: Bool?
+	/// When the mute ends; 0 means not muted and a negative value means muted indefinitely.
+	public let muteEndTime: Int64?
+	public let unreadCount: Int?
+	public let isMarkedAsUnread: Bool?
 
 	public init(
 		id: String,
@@ -90,7 +96,12 @@ public struct HistorySyncChat: Equatable, Sendable {
 		lid: String?,
 		phoneNumber: String?,
 		lastMessageReceivedTimestamp: UInt64?,
-		latestMessage: ReceivedMessage?
+		latestMessage: ReceivedMessage?,
+		isPinned: Bool? = nil,
+		isArchived: Bool? = nil,
+		muteEndTime: Int64? = nil,
+		unreadCount: Int? = nil,
+		isMarkedAsUnread: Bool? = nil
 	) {
 		self.id = id
 		self.name = name
@@ -100,6 +111,11 @@ public struct HistorySyncChat: Equatable, Sendable {
 		self.phoneNumber = phoneNumber
 		self.lastMessageReceivedTimestamp = lastMessageReceivedTimestamp
 		self.latestMessage = latestMessage
+		self.isPinned = isPinned
+		self.isArchived = isArchived
+		self.muteEndTime = muteEndTime
+		self.unreadCount = unreadCount
+		self.isMarkedAsUnread = isMarkedAsUnread
 	}
 }
 
@@ -240,7 +256,12 @@ enum HistorySyncProcessor {
 					lid: chat.hasLidJid ? chat.lidJid : chat.hasAccountLid ? chat.accountLid : nil,
 					phoneNumber: chat.hasPnJid ? chat.pnJid : nil,
 					lastMessageReceivedTimestamp: lastMessageReceivedTimestamp,
-					latestMessage: latestMessage
+					latestMessage: latestMessage,
+					isPinned: chat.hasPinned ? chat.pinned > 0 : nil,
+					isArchived: chat.hasArchived ? chat.archived : nil,
+					muteEndTime: chat.hasMuteEndTime ? Int64(truncatingIfNeeded: chat.muteEndTime) : nil,
+					unreadCount: chat.hasUnreadCount ? Int(chat.unreadCount) : nil,
+					isMarkedAsUnread: chat.hasMarkedAsUnread ? chat.markedAsUnread : nil
 				))
 			}
 		case .pushName:

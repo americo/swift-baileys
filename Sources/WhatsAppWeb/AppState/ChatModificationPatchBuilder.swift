@@ -31,6 +31,19 @@ struct ChatModificationPatch: Equatable, Sendable {
 		self.apiVersion = apiVersion
 		self.operation = operation
 	}
+
+	/// WhatsApp orders actions on the same index by this timestamp.
+	func stamped(milliseconds: Int64) -> ChatModificationPatch {
+		var action = syncAction
+		action.timestamp = milliseconds
+		return ChatModificationPatch(
+			syncAction: action,
+			index: index,
+			type: type,
+			apiVersion: apiVersion,
+			operation: operation
+		)
+	}
 }
 
 struct ChatModificationContact: Equatable, Sendable {
@@ -67,16 +80,25 @@ enum ChatModification: Equatable, Sendable {
 	case clear(jid: String, messageRange: Proto_SyncActionValue.SyncActionMessageRange)
 	case pin(jid: String, pinned: Bool)
 	case contact(jid: String, contact: ChatModificationContact?)
-	case star(jid: String, messageID: String, fromMe: Bool, starred: Bool)
+	case star(jid: String, messageID: String, fromMe: Bool, participant: String? = nil, starred: Bool)
 	case deleteChat(jid: String, messageRange: Proto_SyncActionValue.SyncActionMessageRange)
-	case deleteForMe(jid: String, messageID: String, fromMe: Bool, timestamp: Int64, deleteMedia: Bool)
+	case deleteForMe(jid: String, messageID: String, fromMe: Bool, participant: String? = nil, timestamp: Int64, deleteMedia: Bool)
 	case quickReply(timestamp: String, shortcut: String, message: String, deleted: Bool)
 	case labelEdit(id: String, name: String?, color: Int32?, predefinedID: Int32?, deleted: Bool?)
 	case chatLabel(jid: String, labelID: String, labeled: Bool)
 	case messageLabel(jid: String, messageID: String, labelID: String, labeled: Bool)
+	case favoriteSticker(FavoriteSticker)
 }
 
 enum ChatModificationPatchBuilder {
+	/// The last part of a message's index: who sent it inside a group, otherwise "0".
+	private static func senderIndex(fromMe: Bool, participant: String?) -> String {
+		guard !fromMe, let participant, !participant.isEmpty else {
+			return "0"
+		}
+		return JID(participant)?.normalizedUser ?? participant
+	}
+
 	static func patch(for modification: ChatModification) -> ChatModificationPatch {
 		switch modification {
 		case .mute(let jid, let muteEndTimestamp):
@@ -199,14 +221,14 @@ enum ChatModificationPatchBuilder {
 				apiVersion: 2,
 				operation: contact == nil ? .remove : .set
 			)
-		case .star(let jid, let messageID, let fromMe, let starred):
+		case .star(let jid, let messageID, let fromMe, let participant, let starred):
 			var star = Proto_SyncActionValue.StarAction()
 			star.starred = starred
 			var action = Proto_SyncActionValue()
 			action.starAction = star
 			return ChatModificationPatch(
 				syncAction: action,
-				index: ["star", jid, messageID, fromMe ? "1" : "0", "0"],
+				index: ["star", jid, messageID, fromMe ? "1" : "0", senderIndex(fromMe: fromMe, participant: participant)],
 				type: .regularLow,
 				apiVersion: 2,
 				operation: .set
@@ -223,7 +245,7 @@ enum ChatModificationPatchBuilder {
 				apiVersion: 6,
 				operation: .set
 			)
-		case .deleteForMe(let jid, let messageID, let fromMe, let timestamp, let deleteMedia):
+		case .deleteForMe(let jid, let messageID, let fromMe, let participant, let timestamp, let deleteMedia):
 			var delete = Proto_SyncActionValue.DeleteMessageForMeAction()
 			delete.deleteMedia = deleteMedia
 			delete.messageTimestamp = timestamp
@@ -231,7 +253,7 @@ enum ChatModificationPatchBuilder {
 			action.deleteMessageForMeAction = delete
 			return ChatModificationPatch(
 				syncAction: action,
-				index: ["deleteMessageForMe", jid, messageID, fromMe ? "1" : "0", "0"],
+				index: ["deleteMessageForMe", jid, messageID, fromMe ? "1" : "0", senderIndex(fromMe: fromMe, participant: participant)],
 				type: .regularHigh,
 				apiVersion: 3,
 				operation: .set
@@ -285,6 +307,26 @@ enum ChatModificationPatchBuilder {
 				index: ["label_jid", labelID, jid],
 				type: .regular,
 				apiVersion: 3,
+				operation: .set
+			)
+		case .favoriteSticker(let sticker):
+			var value = Proto_SyncActionValue.StickerAction()
+			value.url = sticker.url
+			value.directPath = sticker.directPath
+			value.mediaKey = sticker.mediaKey
+			value.fileEncSha256 = sticker.fileEncSHA256
+			value.mimetype = sticker.mimetype
+			value.width = sticker.width
+			value.height = sticker.height
+			value.fileLength = sticker.fileLength
+			value.isFavorite = sticker.isFavorite
+			var action = Proto_SyncActionValue()
+			action.stickerAction = value
+			return ChatModificationPatch(
+				syncAction: action,
+				index: ["sticker", sticker.id],
+				type: .regularLow,
+				apiVersion: 2,
 				operation: .set
 			)
 		case .messageLabel(let jid, let messageID, let labelID, let labeled):

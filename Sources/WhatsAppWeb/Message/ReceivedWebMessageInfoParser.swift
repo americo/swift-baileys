@@ -32,7 +32,10 @@ enum ReceivedWebMessageInfoParser {
 			pushName: info.hasPushName ? info.pushName : nil,
 			stub: stub,
 			messageSecret: info.hasMessage ? secret(of: info.message) : nil,
-			reactions: info.reactions.map(reaction)
+			reactions: info.reactions.map(reaction),
+			starred: info.starred,
+			textStyle: info.hasMessage ? textStyle(of: info.message) : nil,
+			isViewOnce: info.hasMessage && MessageContentNormalizer.isViewOnce(info.message)
 		)
 	}
 
@@ -42,6 +45,17 @@ enum ReceivedWebMessageInfoParser {
 			text: reaction.hasText ? reaction.text : nil,
 			groupingKey: reaction.hasGroupingKey ? reaction.groupingKey : nil,
 			senderTimestampMilliseconds: reaction.hasSenderTimestampMs ? reaction.senderTimestampMs : nil
+		)
+	}
+
+	static func textStyle(of message: Proto_Message) -> ReceivedTextStyle? {
+		let normalized = MessageContentNormalizer.normalized(message)
+		guard normalized.hasExtendedTextMessage else { return nil }
+		let text = normalized.extendedTextMessage
+		guard text.hasBackgroundArgb || text.hasTextArgb else { return nil }
+		return ReceivedTextStyle(
+			backgroundARGB: text.hasBackgroundArgb ? text.backgroundArgb : nil,
+			textARGB: text.hasTextArgb ? text.textArgb : nil
 		)
 	}
 

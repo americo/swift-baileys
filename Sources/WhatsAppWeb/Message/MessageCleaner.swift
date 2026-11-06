@@ -24,7 +24,10 @@ public enum MessageCleaner {
 			pushName: message.pushName,
 			stub: message.stub,
 			messageSecret: message.messageSecret,
-			reactions: message.reactions
+			reactions: message.reactions,
+			starred: message.starred,
+			textStyle: message.textStyle,
+			isViewOnce: message.isViewOnce
 		)
 	}
 
