@@ -53,8 +53,6 @@ public enum CallStanzaBuilder {
 	/// Opus this library sends and receives is signaled as 16000 alone.
 	public static let defaultAudioRates = ["16000"]
 	public static let rejectReasonBusy = "busy"
-	/// The device could not decrypt the offer. Like `busy`, this speaks for that device only.
-	public static let rejectReasonEnc = "enc"
 	public static let terminateReasonAcceptedElsewhere = "accepted_elsewhere"
 
 	/// `<offer>`: privacy → audio… → net → capability → destination|enc → encopt → device-identity.

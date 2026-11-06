@@ -58,4 +58,20 @@ public struct WhatsAppCallEvent: Equatable, Sendable {
 		self.senderJID = senderJID
 		self.reason = reason
 	}
+
+	/// A `reject` that speaks only for the device that sent it, so the call stays alive.
+	///
+	/// `busy`, `enc` and `uncallable` say that one device cannot take the call, and the others go on
+	/// ringing. Hosted devices of an account cannot take a voice call at all and turn down every offer
+	/// as soon as it arrives, so whatever they send decides nothing either.
+	public var isDeviceOnlyReject: Bool {
+		guard status == .reject else {
+			return false
+		}
+
+		return reason.map(Self.deviceOnlyRejectReasons.contains) == true
+			|| senderJID?.contains("@hosted") == true
+	}
+
+	private static let deviceOnlyRejectReasons: Set<String> = ["busy", "enc", "uncallable"]
 }
