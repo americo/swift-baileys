@@ -19,6 +19,10 @@ public enum CallAudioDeviceError: Error, Equatable, Sendable {
 public final class CallAudioDevice: @unchecked Sendable {
 	private static let captureWatchdog: DispatchTimeInterval = .seconds(1)
 	private static let voiceProcessingAttempts = 3
+	/// Below this a decoded sample is treated as silence, about -60 dB.
+	private static let audibleSample = 32
+	/// Checks in a row with audio queued but a silent mixer before the player is restarted.
+	private static let silentOutputLimit = 2
 
 	private let lock = NSLock()
 	private var engine = AVAudioEngine()
@@ -32,6 +36,13 @@ public final class CallAudioDevice: @unchecked Sendable {
 	private var generation = 0
 	/// Set by each tap, cleared by each watchdog check.
 	private var capturedSinceCheck = false
+	/// Audible samples were queued, or reached the mixer, since the last watchdog check.
+	private var scheduledAudioSinceCheck = false
+	private var mixerAudioSinceCheck = false
+	private var silentOutputChecks = 0
+	private var playedFrames = 0
+	/// Loudest sample that reached the mixer, 0 to 1. Zero after a call means nothing was played.
+	private(set) var maxPlaybackPeak: Float = 0
 	private var attempts = 0
 	private var configurationObserver: NSObjectProtocol?
 	private var echoCancellationActive = false
@@ -80,6 +91,7 @@ public final class CallAudioDevice: @unchecked Sendable {
 			return
 		}
 
+		WhatsAppLog.logger.notice("call audio: stopped played=\(self.playedFrames) outputPeak=\(self.maxPlaybackPeak) echoCancellation=\(self.echoCancellationActive)")
 		running = false
 		generation += 1
 		onFrame = nil
@@ -115,6 +127,10 @@ public final class CallAudioDevice: @unchecked Sendable {
 			return
 		}
 
+		playedFrames += 1
+		if samples.contains(where: { abs(Int($0)) > Self.audibleSample }) {
+			scheduledAudioSinceCheck = true
+		}
 		player.scheduleBuffer(buffer, completionHandler: nil)
 	}
 
@@ -165,6 +181,7 @@ public final class CallAudioDevice: @unchecked Sendable {
 			return
 		}
 
+		recoverSilentOutput()
 		if capturedSinceCheck {
 			capturedSinceCheck = false
 			scheduleWatchdog()
@@ -196,6 +213,28 @@ public final class CallAudioDevice: @unchecked Sendable {
 		}
 	}
 
+	/// A player can report that it is playing while nothing reaches the mixer. Call with the lock.
+	private func recoverSilentOutput() {
+		defer {
+			scheduledAudioSinceCheck = false
+			mixerAudioSinceCheck = false
+		}
+		guard scheduledAudioSinceCheck, !mixerAudioSinceCheck else {
+			silentOutputChecks = 0
+			return
+		}
+
+		silentOutputChecks += 1
+		guard silentOutputChecks >= Self.silentOutputLimit, engine.isRunning else {
+			return
+		}
+
+		WhatsAppLog.logger.notice("call audio: queued audio is not reaching the output, restarting the player")
+		silentOutputChecks = 0
+		player.stop()
+		player.play()
+	}
+
 	/// The audio device changed under the engine, which stops it. The graph is still valid unless
 	/// the watchdog finds otherwise, so the cheap recovery comes first.
 	private func handleConfigurationChange(generation expected: Int) {
@@ -207,6 +246,9 @@ public final class CallAudioDevice: @unchecked Sendable {
 
 		WhatsAppLog.logger.notice("call audio: engine stopped by a configuration change, restarting it")
 		do {
+			// The player must be stopped first. Otherwise it claims to be playing after the restart
+			// but renders nothing, and the call is silent on this side only.
+			player.stop()
 			try engine.start()
 			player.play()
 		} catch {
@@ -269,13 +311,40 @@ public final class CallAudioDevice: @unchecked Sendable {
 			self?.capture(buffer, captureFormat: captureFormat, generation: tapGeneration)
 		}
 
+		engine.mainMixerNode.installTap(onBus: 0, bufferSize: 2_048, format: nil) { [weak self] buffer, _ in
+			self?.observeOutput(buffer, generation: tapGeneration)
+		}
+
 		engine.prepare()
 		try engine.start()
 		player.play()
 	}
 
+	private func observeOutput(_ buffer: AVAudioPCMBuffer, generation tapGeneration: Int) {
+		guard let channel = buffer.floatChannelData?[0] else {
+			return
+		}
+
+		var peak: Float = 0
+		for index in 0..<Int(buffer.frameLength) {
+			peak = max(peak, abs(channel[index]))
+		}
+
+		lock.lock()
+		defer { lock.unlock() }
+		guard generation == tapGeneration else {
+			return
+		}
+
+		maxPlaybackPeak = max(maxPlaybackPeak, peak)
+		if peak > Float(Self.audibleSample) / 32_768 / 4 {
+			mixerAudioSinceCheck = true
+		}
+	}
+
 	private static func tearDown(_ engine: AVAudioEngine, _ player: AVAudioPlayerNode) {
 		engine.inputNode.removeTap(onBus: 0)
+		engine.mainMixerNode.removeTap(onBus: 0)
 		player.stop()
 		engine.stop()
 		if player.engine != nil {

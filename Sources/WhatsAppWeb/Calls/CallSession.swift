@@ -85,6 +85,8 @@ public actor CallSession {
 	public private(set) var packetsRejected = 0
 	public private(set) var decodeFailures = 0
 	public private(set) var keysRejected = 0
+	/// Loudest decoded sample so far. Zero with packets arriving means the peer's audio decodes to silence.
+	public private(set) var decodedPeak = 0
 
 	/// Builds a session. `link` defaults to the DTLS+SCTP transport to the relay the call selected.
 	public init(configuration: Configuration, link: (any CallRelayLink)? = nil) throws {
@@ -199,7 +201,7 @@ public actor CallSession {
 			return
 		}
 
-		WhatsAppLog.logger.notice("call \(self.configuration.callID, privacy: .public): stopped sent=\(self.framesSent) received=\(self.framesReceived) rejected=\(self.packetsRejected) badKeys=\(self.keysRejected) undecodable=\(self.decodeFailures)")
+		WhatsAppLog.logger.notice("call \(self.configuration.callID, privacy: .public): stopped sent=\(self.framesSent) received=\(self.framesReceived) rejected=\(self.packetsRejected) badKeys=\(self.keysRejected) undecodable=\(self.decodeFailures) decodedPeak=\(self.decodedPeak)")
 		isRunning = false
 		isAllocated = false
 		keepaliveTask?.cancel()
@@ -238,10 +240,14 @@ public actor CallSession {
 			return
 		}
 
+		var received: CallAudioPipeline.Received?
 		do {
-			let received = try pipeline.unprotect(message)
-			let pcm = try decoder.decode(received.payload)
+			received = try pipeline.unprotect(message)
+			let pcm = try decoder.decode(received?.payload ?? Data())
 			framesReceived += 1
+			for sample in pcm {
+				decodedPeak = max(decodedPeak, abs(Int(sample)))
+			}
 			receivedContinuation.yield(pcm)
 		} catch CallAudioPipeline.ReceiveError.authenticationFailed {
 			packetsRejected += 1
@@ -251,6 +257,10 @@ public actor CallSession {
 		} catch {
 			packetsRejected += 1
 			decodeFailures += 1
+			if decodeFailures <= 5, let received {
+				let first = received.payload.first.map { String(format: "%02x", $0) } ?? "-"
+				WhatsAppLog.logger.notice("call \(self.configuration.callID, privacy: .public): undecodable packet pt=\(received.header.payloadType) bytes=\(received.payload.count) first=\(first, privacy: .public)")
+			}
 		}
 	}
 
