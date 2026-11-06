@@ -45,7 +45,8 @@ extension WhatsAppClient {
 			status: status,
 			offline: node.attrs["offline"] != nil,
 			latencyMs: callLatency(from: infoChild, status: status),
-			senderJID: node.attrs["participant"] ?? chatID
+			senderJID: node.attrs["participant"] ?? chatID,
+			reason: infoChild.attrs["reason"]
 		)
 
 		if status == .offer {

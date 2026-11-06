@@ -110,7 +110,7 @@ public actor CallSession {
 		self.integrityKey = key
 		self.relayHost = address.host
 		self.relayPort = address.port
-		self.link = link ?? CallRelayTransport(host: address.host, port: address.port)
+		self.link = link ?? CallRelayDialer(host: address.host, advertisedPort: address.port)
 		self.pipeline = try CallAudioPipeline(
 			callKey: configuration.callKey,
 			selfParticipantID: configuration.selfParticipantID,

@@ -26,6 +26,8 @@ public struct WhatsAppCallEvent: Equatable, Sendable {
 	public let latencyMs: Int?
 	/// The device that sent this stanza. An `accept` names the device that answered the call.
 	public let senderJID: String?
+	/// The stanza's `reason`, such as `busy` on a `reject`.
+	public let reason: String?
 
 	public init(
 		chatID: String,
@@ -39,7 +41,8 @@ public struct WhatsAppCallEvent: Equatable, Sendable {
 		status: WhatsAppCallUpdateType,
 		offline: Bool,
 		latencyMs: Int? = nil,
-		senderJID: String? = nil
+		senderJID: String? = nil,
+		reason: String? = nil
 	) {
 		self.chatID = chatID
 		self.from = from
@@ -53,5 +56,6 @@ public struct WhatsAppCallEvent: Equatable, Sendable {
 		self.offline = offline
 		self.latencyMs = latencyMs
 		self.senderJID = senderJID
+		self.reason = reason
 	}
 }

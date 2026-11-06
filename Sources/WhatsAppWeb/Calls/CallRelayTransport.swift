@@ -30,6 +30,7 @@ public actor CallRelayTransport {
 	private var timerTask: Task<Void, Never>?
 	private var receiveTask: Task<Void, Never>?
 	private var isClosed = false
+	private var dtlsReady = false
 
 	public init(host: String, port: UInt16) {
 		self.host = host
@@ -41,7 +42,7 @@ public actor CallRelayTransport {
 	}
 
 	/// Opens the DTLS session and the SCTP association; returns once the media stream is usable.
-	public func connect(timeout: Duration = .seconds(10)) async throws {
+	public func connect(timeout: Duration = .seconds(12)) async throws {
 		guard connection == nil, !isClosed else {
 			throw CallRelayTransportError.failed("transport already used")
 		}
@@ -72,20 +73,27 @@ public actor CallRelayTransport {
 		}
 		defer { deadline.cancel() }
 
-		try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-			if let pendingResult {
-				continuation.resume(with: pendingResult)
-				return
-			}
-
-			established = continuation
-		}
-
+		// Before the wait: a lost INIT or COOKIE-ECHO is only ever sent again from these ticks.
 		timerTask = Task { [weak self] in
 			while !Task.isCancelled {
 				try? await Task.sleep(for: .milliseconds(50))
 				await self?.tick()
 			}
+		}
+
+		do {
+			try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+				if let pendingResult {
+					continuation.resume(with: pendingResult)
+					return
+				}
+
+				established = continuation
+			}
+		} catch {
+			WhatsAppLog.logger.notice("call relay \(self.host, privacy: .public):\(self.port): not connected, dtlsReady=\(self.dtlsReady): \(String(describing: error), privacy: .public)")
+			shutDown(reason: "handshake failed")
+			throw error
 		}
 	}
 
@@ -161,6 +169,8 @@ public actor CallRelayTransport {
 				return
 			}
 
+			dtlsReady = true
+			WhatsAppLog.logger.notice("call relay \(self.host, privacy: .public):\(self.port): dtls ready")
 			association.connect(now: Self.nowMs())
 			flush()
 		case let .failed(error):
@@ -202,6 +212,7 @@ public actor CallRelayTransport {
 		while let event = association.pollEvent() {
 			switch event {
 			case .established:
+				WhatsAppLog.logger.notice("call relay \(self.host, privacy: .public):\(self.port): sctp established")
 				finishConnect(.success(()))
 			case let .message(_, _, data):
 				messageContinuation.yield(data)
