@@ -49,8 +49,10 @@ extension WhatsAppClient {
 
 		if status == .offer {
 			callOfferCache[call.id] = call
+			callOfferNodes[call.id] = node
 		} else if callShouldClearOffer(status) {
 			callOfferCache.removeValue(forKey: call.id)
+			callOfferNodes.removeValue(forKey: call.id)
 		}
 
 		eventContinuation.yield(.call([call]))

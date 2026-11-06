@@ -121,6 +121,8 @@ public actor WhatsAppClient {
 	var noiseTransport: NoiseTransportState?
 	var keepAliveTask: Task<Void, Never>?
 	var callOfferCache: [String: WhatsAppCallEvent] = [:]
+	/// Raw `<call>` stanzas of offers still ringing, kept so the call key can be decrypted on accept.
+	var callOfferNodes: [String: BinaryNode] = [:]
 	var recentSentMessages: [RecentSentMessageKey: RecentSentMessage] = [:]
 	var recentSentMessageOrder: [RecentSentMessageKey] = []
 	var retryResendCounts: [RetryResendKey: Int] = [:]
