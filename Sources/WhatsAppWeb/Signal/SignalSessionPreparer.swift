@@ -107,6 +107,10 @@ public struct SignalSessionPreparer: SignalSessionPreparing {
 		self.localJIDProvider = localJIDProvider
 	}
 
+	private static func canonicalJID(_ jid: String) -> String {
+		jid.replacingOccurrences(of: ":0@", with: "@")
+	}
+
 	public func assertSessions(for jids: [String], force: Bool = false) async throws -> Bool {
 		let uniqueJIDs = orderedUnique(jids)
 		for jid in uniqueJIDs where SignalProtocolAddress(jid: jid) == nil {
@@ -126,16 +130,27 @@ public struct SignalSessionPreparer: SignalSessionPreparing {
 			return false
 		}
 
-		let bundles = try await bundleResolver.fetchBundles(for: jidsRequiringFetch, force: force)
+		let fetched = try await bundleResolver.fetchBundles(for: jidsRequiringFetch, force: force)
 		let requestedJIDs = Set(jidsRequiringFetch)
+		// The server answers the primary device as `user:0@server` while the request names it
+		// `user@server`; match on the form without a zero device and keep the requested spelling.
+		let requestedByCanonical = Dictionary(jidsRequiringFetch.map { (Self.canonicalJID($0), $0) }, uniquingKeysWith: { first, _ in first })
+		var bundles: [SignalSessionBundle] = []
 		var returnedJIDs = Set<String>()
-		for bundle in bundles {
+		for bundle in fetched {
 			guard (try? bundle.validatedAddress()) != nil,
-				  requestedJIDs.contains(bundle.jid) else {
+				  let requested = requestedJIDs.contains(bundle.jid) ? bundle.jid : requestedByCanonical[Self.canonicalJID(bundle.jid)] else {
 				throw SignalSessionPreparationError.invalidBundle
 			}
 
-			returnedJIDs.insert(bundle.jid)
+			returnedJIDs.insert(requested)
+			bundles.append(requested == bundle.jid ? bundle : SignalSessionBundle(
+				jid: requested,
+				registrationID: bundle.registrationID,
+				identityKey: bundle.identityKey,
+				signedPreKey: bundle.signedPreKey,
+				preKey: bundle.preKey
+			))
 		}
 
 		guard returnedJIDs == requestedJIDs else {
