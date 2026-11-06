@@ -153,8 +153,8 @@ public struct WhatsAppNativeSignalSession: Sendable {
 	public let signedPreKeyID: Int
 	public let signedPreKeyCurve25519PublicKey: Data
 	public let signedPreKeySignature: Data
-	public let preKeyID: Int
-	public let preKeyCurve25519PublicKey: Data
+	public let preKeyID: Int?
+	public let preKeyCurve25519PublicKey: Data?
 
 	public init(request: SignalSessionNativeInstallRequest) {
 		self.request = request
