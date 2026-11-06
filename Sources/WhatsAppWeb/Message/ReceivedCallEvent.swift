@@ -12,6 +12,12 @@ public enum WhatsAppCallUpdateType: String, Sendable {
 	case terminate
 	/// A mid-call change of the peer's video, carried by `videoState`.
 	case video
+	/// A committed group roster, carried by `groupUpdate`.
+	case groupUpdate
+	/// A new shared group media key, carried by `groupEpoch`.
+	case groupEpoch
+	/// A participant's microphone, carried by `isMuted`.
+	case mute
 }
 
 public struct WhatsAppCallEvent: Equatable, Sendable {
@@ -34,6 +40,15 @@ public struct WhatsAppCallEvent: Equatable, Sendable {
 	public let videoState: Int?
 	/// Quarter turns the sender's camera is rotated by, on stanzas that announce it.
 	public let videoOrientation: Int?
+	/// The committed roster of a `.groupUpdate`, or of a group `.offer`.
+	public let groupUpdate: GroupCallUpdate?
+	public let groupEpoch: GroupCallEpoch?
+	/// The state a `.mute` announces.
+	public let isMuted: Bool?
+	/// A group call's notice to its members, which cannot be answered. The call itself has an `<offer>`.
+	public let isNotice: Bool
+	/// Sent by another device of this account, which decides a ringing group call for this one too.
+	public let isFromOwnAccount: Bool
 
 	public init(
 		chatID: String,
@@ -50,7 +65,12 @@ public struct WhatsAppCallEvent: Equatable, Sendable {
 		senderJID: String? = nil,
 		reason: String? = nil,
 		videoState: Int? = nil,
-		videoOrientation: Int? = nil
+		videoOrientation: Int? = nil,
+		groupUpdate: GroupCallUpdate? = nil,
+		groupEpoch: GroupCallEpoch? = nil,
+		isMuted: Bool? = nil,
+		isNotice: Bool = false,
+		isFromOwnAccount: Bool = false
 	) {
 		self.chatID = chatID
 		self.from = from
@@ -67,6 +87,11 @@ public struct WhatsAppCallEvent: Equatable, Sendable {
 		self.reason = reason
 		self.videoState = videoState
 		self.videoOrientation = videoOrientation
+		self.groupUpdate = groupUpdate
+		self.groupEpoch = groupEpoch
+		self.isMuted = isMuted
+		self.isNotice = isNotice
+		self.isFromOwnAccount = isFromOwnAccount
 	}
 
 	/// A `reject` that speaks only for the device that sent it, so the call stays alive.

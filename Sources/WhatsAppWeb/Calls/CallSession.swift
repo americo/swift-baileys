@@ -41,12 +41,15 @@ public enum CallVideoSendEvent: Equatable, Sendable {
 	case targetBitrate(Int)
 }
 
-/// Media half of a 1:1 call: registers with the relay (STUN Allocate and keepalives), then turns
+/// Media half of a call: registers with the relay (STUN Allocate and keepalives), then turns
 /// microphone frames into protected Opus RTP and encoded pictures into protected H.264 RTP, and
 /// incoming RTP back into PCM and pictures.
 ///
 /// Every call can carry video, since a voice call can be upgraded. Signaling is separate
 /// (`startVoiceCall`, `acceptVoiceCall`); this takes the call key and relay block those produce.
+///
+/// A group call is the same session with participant-indexed receiving on top. It starts that way, or
+/// becomes it when a 1:1 call's first roster arrives. Sending is shared: one stream, keyed per epoch.
 public actor CallSession {
 	public struct Configuration: Sendable {
 		public let callID: String
@@ -54,19 +57,23 @@ public actor CallSession {
 		public let peerParticipantID: String
 		public let callKey: Data
 		public let relay: CallRelayData
+		/// The first roster of a call that starts as a group call. Media waits for its first key.
+		public let groupUpdate: GroupCallUpdate?
 
 		public init(
 			callID: String,
 			selfParticipantID: String,
 			peerParticipantID: String,
 			callKey: Data,
-			relay: CallRelayData
+			relay: CallRelayData,
+			groupUpdate: GroupCallUpdate? = nil
 		) {
 			self.callID = callID
 			self.selfParticipantID = selfParticipantID
 			self.peerParticipantID = peerParticipantID
 			self.callKey = callKey
 			self.relay = relay
+			self.groupUpdate = groupUpdate
 		}
 	}
 
@@ -92,6 +99,10 @@ public actor CallSession {
 	public static let initialVideoBitrate = 700_000
 	public static let minimumVideoBitrate = 250_000
 	public static let maximumVideoBitrate = 2_000_000
+	/// One stream goes to everyone in a group, so the path of the slowest sets the worth of a higher rate.
+	public static let maximumGroupVideoBitrate = 1_000_000
+	/// Playout cadence of a group call, where the mixer is what produces audio.
+	public static let groupPlayoutInterval: Duration = .milliseconds(20)
 
 	/// How far above the measured video rate the pacer runs, the factor WebRTC's paced sender uses.
 	private static let paceFactor = 2.5
@@ -115,6 +126,9 @@ public actor CallSession {
 	/// Pictures from the peer. Only the newest few wait: stale video is worse than a dropped frame.
 	public nonisolated let receivedVideo: AsyncStream<CallVideoFrame>
 	public nonisolated let videoSendEvents: AsyncStream<CallVideoSendEvent>
+	/// Pictures from each participant of a group call. Roomier than `receivedVideo`, since several
+	/// streams share it and a dropped picture costs its stream a keyframe.
+	public nonisolated let receivedParticipantVideo: AsyncStream<CallParticipantVideoFrame>
 	/// Yields when the peer has stopped sending anything, or the relay path has closed. A hang-up does
 	/// not always reach this client as a stanza, and without this the call would stay up on its own.
 	public nonisolated let peerGone: AsyncStream<Void>
@@ -123,6 +137,13 @@ public actor CallSession {
 	private let receivedVideoContinuation: AsyncStream<CallVideoFrame>.Continuation
 	private let videoSendEventsContinuation: AsyncStream<CallVideoSendEvent>.Continuation
 	private let peerGoneContinuation: AsyncStream<Void>.Continuation
+	private let receivedParticipantVideoContinuation: AsyncStream<CallParticipantVideoFrame>.Continuation
+	/// Participant-indexed receive state, once this is a group call.
+	private var group: GroupMediaState?
+	private var playoutTask: Task<Void, Never>?
+	private var linkGeneration = 0
+	private let linkFactory: @Sendable (String, UInt16) -> any CallRelayLink
+	private var allocatePendingSince: ContinuousClock.Instant?
 	private let peerSilenceTimeout: Duration
 	private var lastPeerActivity: ContinuousClock.Instant?
 	private var watchdogTask: Task<Void, Never>?
@@ -132,23 +153,28 @@ public actor CallSession {
 	private var rtcpAccepted = 0
 	private var lastMediaLog: ContinuousClock.Instant?
 	private let configuration: Configuration
-	private let link: any CallRelayLink
-	private let relayToken: Data
-	private let integrityKey: Data
-	private let relayHost: String
-	private let relayPort: UInt16
+	private var link: any CallRelayLink
+	private var relayToken: Data
+	private var integrityKey: Data
+	private var relayHost: String
+	private var relayPort: UInt16
 	private var pipeline: CallAudioPipeline
 	private var video: CallVideoPipeline
-	private let rtcpSendKeys: CallSRTPKeys
+	private var rtcpSendKeys: CallSRTPKeys
 	private let rtcpReceiveKeys: CallSRTPKeys
-	private let cname: [UInt8]
+	private var cname: [UInt8]
+	private var audioCNAME: [UInt8]
+	private var audioPacketsSent: UInt32 = 0
+	private var audioOctetsSent: UInt32 = 0
+	private let audioSSRC: UInt32
+	private let tagLength: Int
 	private var rtcpIndex: UInt32 = 1
 	private var rtcpReplay = CallSRTCPReplayWindow()
 	private var reception = CallRTPReceptionStats()
 	private let encoder: CallOpusEncoder
 	private let decoder: CallOpusDecoder
-	private let allocateRequest: Data
-	private let allocateTransactionID: Data
+	private var allocateRequest: Data
+	private var allocateTransactionID: Data
 
 	private var isRunning = false
 	private var isAllocated = false
@@ -228,6 +254,9 @@ public actor CallSession {
 		self.relayHost = address.host
 		self.relayPort = address.port
 		self.link = link ?? CallRelayDialer(host: address.host, advertisedPort: address.port)
+		self.linkFactory = { host, port in link ?? CallRelayDialer(host: host, advertisedPort: port) }
+		self.audioSSRC = ssrc
+		self.tagLength = configuration.relay.warpTagLength ?? CallMediaCrypto.warpTagLength
 		self.pipeline = try CallAudioPipeline(
 			callKey: configuration.callKey,
 			selfParticipantID: configuration.selfParticipantID,
@@ -248,6 +277,7 @@ public actor CallSession {
 			participantID: CallMediaCrypto.formatParticipantID(configuration.peerParticipantID)
 		)
 		self.cname = CallRTCP.cname(ssrc: videoSSRC, callKey: configuration.callKey)
+		self.audioCNAME = CallRTCP.cname(ssrc: ssrc, callKey: configuration.callKey)
 		self.encoder = try CallOpusEncoder()
 		self.decoder = try CallOpusDecoder()
 		self.allocateTransactionID = Data(transaction)
@@ -270,6 +300,7 @@ public actor CallSession {
 		(self.receivedVideo, self.receivedVideoContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(4))
 		(self.videoSendEvents, self.videoSendEventsContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(8))
 		(self.peerGone, self.peerGoneContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
+		(self.receivedParticipantVideo, self.receivedParticipantVideoContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(48))
 	}
 
 	/// Connects to the relay and waits for the Allocate to succeed.
@@ -278,17 +309,15 @@ public actor CallSession {
 			return
 		}
 
+		if let update = configuration.groupUpdate {
+			try configureGroup(update: update, directPeer: false)
+		}
+
 		try await link.open()
 		isRunning = true
 		WhatsAppLog.logger.notice("call \(self.configuration.callID, privacy: .public): relay channel open \(self.relayHost, privacy: .public):\(self.relayPort)")
 
-		let messages = link.messages
-		receiveTask = Task { [weak self] in
-			for await message in messages {
-				await self?.handle(message)
-			}
-			await self?.relayEnded()
-		}
+		listenToLink()
 
 		let deadline = ContinuousClock.now + Self.allocateTimeout
 		while !isAllocated {
@@ -329,8 +358,23 @@ public actor CallSession {
 				await self?.adaptToLink()
 			}
 		}
+		if group != nil {
+			startPlayout()
+		}
 		if isSendingVideo {
 			requireKeyframe()
+		}
+	}
+
+	private func listenToLink() {
+		linkGeneration += 1
+		let generation = linkGeneration
+		let messages = link.messages
+		receiveTask = Task { [weak self] in
+			for await message in messages {
+				await self?.handle(message)
+			}
+			await self?.relayEnded(generation: generation)
 		}
 	}
 
@@ -339,11 +383,17 @@ public actor CallSession {
 		guard isRunning, isAllocated else {
 			throw CallSessionError.notRunning
 		}
+		// A group's media waits for its key: there is nobody who could decrypt this yet.
+		guard isGroupEpochReady else {
+			return
+		}
 
 		let opus = try encoder.encode(samples)
 		let packet = try pipeline.protect(opus)
 		try await link.send(packet)
 		framesSent += 1
+		audioPacketsSent &+= 1
+		audioOctetsSent &+= UInt32(truncatingIfNeeded: opus.count)
 	}
 
 	// MARK: Sending video
@@ -373,6 +423,14 @@ public actor CallSession {
 		}
 
 		let isIDR = CallH264.hasIDR(accessUnit)
+		guard isGroupEpochReady else {
+			// Discarded, an IDR included, so one has to be asked for again once the key arrives.
+			if isIDR {
+				keyframeAnnounced = false
+			}
+			return
+		}
+
 		if keyframeRequired, !isIDR {
 			requireKeyframe()
 			return
@@ -390,7 +448,8 @@ public actor CallSession {
 		let frameInfo = isIDR ? CallVideoRTPHeader.frameInfoIDR : 0
 		for (index, payload) in payloads.enumerated() {
 			await waitForPacer()
-			guard isRunning, isSendingVideo else {
+			// A requested group key can close the gate while a picture is leaving.
+			guard isRunning, isSendingVideo, isGroupEpochReady else {
 				return
 			}
 
@@ -502,21 +561,25 @@ public actor CallSession {
 		receiveTask?.cancel()
 		reportTask?.cancel()
 		watchdogTask?.cancel()
+		playoutTask?.cancel()
 		keepaliveTask = nil
 		receiveTask = nil
 		reportTask = nil
 		watchdogTask = nil
+		playoutTask = nil
 		await link.close()
 		receivedContinuation.finish()
 		receivedVideoContinuation.finish()
+		receivedParticipantVideoContinuation.finish()
 		videoSendEventsContinuation.finish()
 		peerGoneContinuation.finish()
 	}
 
 	// MARK: Receiving
 
-	private func handle(_ message: Data) async {
-		guard isRunning, let first = message.first else {
+	private func handle(_ received: Data) async {
+		// Before the checks below: the first byte of a group relay's envelope reads as STUN.
+		guard isRunning, let message = CallRelayForwarding.unwrap(received), let first = message.first else {
 			return
 		}
 
@@ -533,8 +596,15 @@ public actor CallSession {
 	}
 
 	private func handleSTUN(_ message: Data) {
+		// A group call re-allocates as its roster changes. An answer to an older request says nothing
+		// about the credentials now in use.
+		if group != nil, CallSTUN.transactionID(message) != allocateTransactionID {
+			return
+		}
+
 		if CallSTUN.isAllocateOrBindingSuccess(message) {
 			isAllocated = true
+			allocatePendingSince = nil
 		} else if CallSTUN.isAllocateError(message) {
 			allocateError = .some(CallSTUN.errorCode(message))
 		}
@@ -549,7 +619,9 @@ public actor CallSession {
 		}
 
 		arrivedByPayloadType[header.payloadType, default: 0] += 1
-		if header.payloadType == CallVideoRTPHeader.h264PayloadType {
+		if let group {
+			await handleGroupRTP(message, header: header, group: group)
+		} else if header.payloadType == CallVideoRTPHeader.h264PayloadType {
 			await handleVideoPacket(message)
 		} else if CallRTPHeader.isAudioPayloadType(header.payloadType) {
 			handleAudioPacket(message)
@@ -659,6 +731,11 @@ public actor CallSession {
 
 		let bytes = [UInt8](message.prefix(8))
 		let sender = (4..<8).reduce(UInt32(0)) { $0 << 8 | UInt32(bytes[$1]) }
+		if let group {
+			await handleGroupRTCP(message, sender: sender, group: group)
+			return
+		}
+
 		guard let (plain, index) = CallMediaCrypto.unprotectRTCP(message, keys: rtcpReceiveKeys, senderSSRC: sender),
 			  rtcpReplay.accept(sender: sender, index: index),
 			  let summary = CallRTCP.parse(plain) else {
@@ -670,6 +747,11 @@ public actor CallSession {
 		for timing in summary.senderTimings {
 			reception.observeSenderReport(ssrc: timing.ssrc, compactNTP: timing.compactNTP, arrivalMs: monotonicMs())
 		}
+		await applyFeedback(summary)
+	}
+
+	/// What the far side's RTCP asks of what this side sends.
+	private func applyFeedback(_ summary: CallRTCP.Summary) async {
 		if CallRTCP.requestsKeyframe(summary.feedback, ssrc: video.ssrc) {
 			keyframesRequestedByPeer += 1
 			keyframeAnnounced = false
@@ -713,7 +795,8 @@ public actor CallSession {
 	}
 
 	private func setVideoBitrate(_ value: Int) {
-		let next = min(max(value, Self.minimumVideoBitrate), Self.maximumVideoBitrate)
+		let ceiling = group == nil ? Self.maximumVideoBitrate : Self.maximumGroupVideoBitrate
+		let next = min(max(value, Self.minimumVideoBitrate), ceiling)
 		guard next != videoBitrate else {
 			return
 		}
@@ -747,6 +830,11 @@ public actor CallSession {
 	/// The periodic report, once video flows in either direction. It also retries a keyframe request
 	/// the throttle held back.
 	private func sendVideoReport() async {
+		if let group {
+			await sendGroupReports(group)
+			return
+		}
+
 		guard isRunning, isAllocated, isSendingVideo || video.inboundSSRC != nil else {
 			return
 		}
@@ -755,6 +843,10 @@ public actor CallSession {
 			await requestPeerKeyframe()
 		}
 
+		await sendRTCP(videoSenderReport(report: reception.report(nowMs: monotonicMs())))
+	}
+
+	private func videoSenderReport(report: CallRTCP.ReceptionReport?) -> Data {
 		// The media clock at this instant, read from the newest picture's capture: pairing a send time
 		// with a capture-stamped timestamp would tell the peer every picture was taken later than it was.
 		var timestamp = lastVideoTimestamp
@@ -764,22 +856,22 @@ public actor CallSession {
 				+ Double(attoseconds) * 1e-18 * Double(CallVideoRTPHeader.clockRate)
 			timestamp = anchor.timestamp &+ UInt32(truncatingIfNeeded: Int64(ticks))
 		}
-		await sendRTCP(CallRTCP.senderReport(
+		return CallRTCP.senderReport(
 			ssrc: video.ssrc,
 			rtpTimestamp: timestamp,
 			packetsSent: videoPacketsSent,
 			octetsSent: videoOctetsSent,
 			wallclockMs: UInt64(Date().timeIntervalSince1970 * 1000),
 			cname: cname,
-			report: reception.report(nowMs: monotonicMs())
-		))
+			report: report
+		)
 	}
 
-	private func sendRTCP(_ plain: Data) async {
+	private func sendRTCP(_ plain: Data, senderSSRC: UInt32? = nil) async {
 		guard let protected = try? CallMediaCrypto.protectRTCP(
 			plain,
 			keys: rtcpSendKeys,
-			senderSSRC: video.ssrc,
+			senderSSRC: senderSSRC ?? video.ssrc,
 			index: rtcpIndex
 		) else {
 			return
@@ -804,8 +896,9 @@ public actor CallSession {
 		try? await link.send(CallSTUN.ping(transactionID: transaction))
 	}
 
-	private func relayEnded() async {
-		guard isRunning else {
+	private func relayEnded(generation: Int) async {
+		// A link replaced mid-call ends without that meaning anything.
+		guard isRunning, generation == linkGeneration else {
 			return
 		}
 
@@ -842,6 +935,17 @@ public actor CallSession {
 	/// has not heard from the peer yet waits, since media can take a moment to start.
 	private func checkPeerActivity() {
 		logMediaArrivals()
+		if group != nil {
+			// Nothing to hear is ordinary in a group, where the roster says who is there. The one thing
+			// that does end it here is a relay that stopped answering a new allocation.
+			if isRunning, let pending = allocatePendingSince, pending.duration(to: clock.now) >= Self.allocateTimeout {
+				WhatsAppLog.logger.notice("call \(self.configuration.callID, privacy: .public): the relay did not answer a new allocation")
+				allocatePendingSince = nil
+				peerGoneContinuation.yield()
+			}
+			return
+		}
+
 		guard isRunning, let last = lastPeerActivity, last.duration(to: clock.now) >= peerSilenceTimeout else {
 			return
 		}
@@ -849,5 +953,621 @@ public actor CallSession {
 		WhatsAppLog.logger.notice("call \(self.configuration.callID, privacy: .public): nothing from the peer for \(self.peerSilenceTimeout, privacy: .public)")
 		lastPeerActivity = nil
 		peerGoneContinuation.yield()
+	}
+}
+
+// MARK: - Group calls
+
+/// Everything a group call adds to a session. The engine this follows keeps it optional in the same way,
+/// which leaves the 1:1 path as it is.
+private final class GroupMediaState {
+	var registry: CallGroupMediaRegistry
+	let streams: CallRelayAllocate.GroupStreams
+	/// The relay allocation held: absent, or held with or without a number.
+	var relayTransaction: UInt32??
+	var localEpochTransaction: UInt32?
+	var requiredEpochTransaction: UInt32?
+	/// A promoted 1:1 call keeps using its call key until a group key replaces it.
+	var isDirectFallbackActive: Bool
+	var mixer = CallGroupAudioMixer()
+	var decoders = [String: CallOpusDecoder]()
+	var audioReception = [String: CallRTPReceptionStats]()
+	var videoReception = [String: CallRTPReceptionStats]()
+	var rtcpReplay = [String: CallSRTCPReplayWindow]()
+	var keyframeAskedAt = [String: ContinuousClock.Instant]()
+	var keyframePending = Set<String>()
+	var nextPlayout: ContinuousClock.Instant?
+
+	init(
+		registry: CallGroupMediaRegistry,
+		streams: CallRelayAllocate.GroupStreams,
+		requiredEpochTransaction: UInt32?,
+		isDirectFallbackActive: Bool
+	) {
+		self.registry = registry
+		self.streams = streams
+		self.requiredEpochTransaction = requiredEpochTransaction
+		self.isDirectFallbackActive = isDirectFallbackActive
+	}
+
+	var isEpochReady: Bool {
+		if let requiredEpochTransaction {
+			return localEpochTransaction.map { $0 >= requiredEpochTransaction } ?? false
+		}
+
+		return localEpochTransaction != nil || isDirectFallbackActive
+	}
+
+	/// Forgets a participant's decode state, whose stream it no longer describes.
+	func resetParticipant(_ id: String) {
+		mixer.reset(id)
+		decoders.removeValue(forKey: id)
+		audioReception.removeValue(forKey: id)
+		videoReception.removeValue(forKey: id)
+		rtcpReplay.removeValue(forKey: id)
+		keyframeAskedAt.removeValue(forKey: id)
+		keyframePending.remove(id)
+	}
+
+	func retainParticipants(_ active: Set<String>) {
+		mixer.retain(registry.activeParticipantIDs)
+		decoders = decoders.filter { active.contains($0.key) }
+		audioReception = audioReception.filter { active.contains($0.key) }
+		videoReception = videoReception.filter { active.contains($0.key) }
+		rtcpReplay = rtcpReplay.filter { active.contains($0.key) }
+		keyframeAskedAt = keyframeAskedAt.filter { active.contains($0.key) }
+		keyframePending = keyframePending.filter { active.contains($0) }
+	}
+}
+
+extension CallSession {
+	/// A relay's allocation, in the form a re-allocation needs it.
+	private struct GroupRelayRefresh {
+		let host: String
+		let port: UInt16
+		let token: Data
+		let integrityKey: Data
+		let tagLength: Int
+	}
+
+	/// Whether this session has become a group call.
+	public var isGroupCall: Bool {
+		group != nil
+	}
+
+	private var isGroupEpochReady: Bool {
+		group?.isEpochReady ?? true
+	}
+
+	private var participantID: String {
+		CallMediaCrypto.formatParticipantID(configuration.selfParticipantID)
+	}
+
+	// MARK: Roster
+
+	/// Applies a committed roster. On a 1:1 call this is the moment it becomes a group call, and its peer
+	/// stays heard on the call key until the first group key arrives.
+	public func applyGroupUpdate(_ update: GroupCallUpdate) async throws {
+		guard let group else {
+			let previous = (host: relayHost, port: relayPort, token: relayToken, key: integrityKey)
+			try configureGroup(update: update, directPeer: true)
+			guard isRunning else {
+				return
+			}
+
+			startPlayout()
+			let moved = relayHost != previous.host || relayPort != previous.port
+			if moved || relayToken != previous.token || integrityKey != previous.key {
+				isAllocated = false
+				allocatePendingSince = moved ? nil : clock.now
+			}
+			if moved {
+				await reconnectRelay()
+			}
+			await transmitAllocate()
+			return
+		}
+
+		// Everything that can fail about the relay is settled before the roster moves, so a corrected
+		// resend of this transaction is not read as stale.
+		let relayTransaction = update.relay.map(\.transactionID)
+		let advancesRelay = relayTransaction.map { incoming in
+			guard let held = group.relayTransaction else {
+				return true
+			}
+			guard let next = incoming else {
+				return false
+			}
+
+			return held.map { next > $0 } ?? true
+		} ?? false
+		let refresh = advancesRelay ? try relayRefresh(for: update) : nil
+		if let refresh, refresh.tagLength != tagLength {
+			throw CallGroupMediaError.tagLengthChanged
+		}
+
+		let previousPIDs = group.registry.activePIDs
+		let previousDevices = group.registry.activeDeviceIDs
+		let migrated = group.registry.participantsWithPIDChanges(update)
+		let result = try group.registry.apply(update)
+		if result == .applied {
+			guard update.localDevice(matching: configuration.selfParticipantID) != nil else {
+				throw CallGroupMediaError.localParticipantRemoved
+			}
+
+			if update.isRekeyRequested {
+				group.requiredEpochTransaction = max(group.requiredEpochTransaction ?? 0, update.transactionID)
+			}
+			migrated.forEach(group.resetParticipant)
+			group.retainParticipants(group.registry.activeDeviceIDs)
+
+			if !update.isVideo {
+				setVideoSending(false)
+			} else if !group.registry.activeDeviceIDs.isSubset(of: previousDevices) {
+				// Someone new has no reference pictures to decode from.
+				forceKeyframe()
+			}
+
+			await commitGroupAllocate(group, refresh: refresh, subscriptionsChanged: group.registry.activePIDs != previousPIDs)
+			syncGroupEpoch(group)
+		} else if advancesRelay {
+			// A relay refresh on a roster already processed: only the allocation moves.
+			await commitGroupAllocate(group, refresh: refresh, subscriptionsChanged: false)
+		}
+		if advancesRelay {
+			group.relayTransaction = relayTransaction
+		}
+	}
+
+	/// Installs a shared media key, or holds it until its roster arrives.
+	public func applyGroupEpoch(_ epoch: GroupCallEpoch) throws {
+		guard let group else {
+			throw CallSessionError.notRunning
+		}
+
+		_ = try group.registry.applyEpoch(transactionID: epoch.transactionID, key: epoch.key)
+		syncGroupEpoch(group)
+	}
+
+	private func configureGroup(update: GroupCallUpdate, directPeer: Bool) throws {
+		guard update.localDevice(matching: configuration.selfParticipantID) != nil else {
+			throw CallGroupMediaError.localParticipantRemoved
+		}
+
+		let refresh = try relayRefresh(for: update)
+		var registry = CallGroupMediaRegistry(
+			callID: configuration.callID,
+			callCreator: update.callCreator,
+			localDevice: configuration.selfParticipantID,
+			tagLength: tagLength
+		)
+		if directPeer {
+			try registry.seedDirectPeer(
+				callKey: configuration.callKey,
+				userJID: CallJID.user(configuration.peerParticipantID),
+				deviceJID: configuration.peerParticipantID,
+				video: true
+			)
+		}
+		_ = try registry.apply(update)
+
+		let streams = CallRelayAllocate.GroupStreams.make(callID: configuration.callID, participantID: participantID)
+		let state = GroupMediaState(
+			registry: registry,
+			streams: streams,
+			requiredEpochTransaction: update.isRekeyRequested ? update.transactionID : nil,
+			isDirectFallbackActive: directPeer
+		)
+		state.relayTransaction = update.relay.map(\.transactionID)
+		state.mixer.retain(state.registry.activeParticipantIDs)
+		group = state
+		adoptAllocation(state, refresh: refresh)
+		syncGroupEpoch(state)
+		WhatsAppLog.logger.notice("call \(self.configuration.callID, privacy: .public): group media, media=\(update.media, privacy: .public) transaction=\(update.transactionID) remotes=\(state.registry.activeDeviceIDs.count)")
+	}
+
+	private func relayRefresh(for update: GroupCallUpdate) throws -> GroupRelayRefresh? {
+		guard let relay = update.relay?.forGroupMedia else {
+			return nil
+		}
+		guard let endpoint = relay.mediaEndpoint(),
+			  let address = endpoint.primaryIPv4,
+			  relay.relayTokens.indices.contains(endpoint.tokenID),
+			  !relay.relayTokens[endpoint.tokenID].isEmpty,
+			  let key = relay.relayKeyASCII, !key.isEmpty else {
+			throw CallGroupMediaError.invalidSnapshot
+		}
+
+		return GroupRelayRefresh(
+			host: address.host,
+			port: address.port,
+			token: relay.relayTokens[endpoint.tokenID],
+			integrityKey: key,
+			tagLength: relay.warpTagLength ?? CallMediaCrypto.warpTagLength
+		)
+	}
+
+	/// Rebuilds the Allocate from what is current. Sending it is up to the caller.
+	private func adoptAllocation(_ group: GroupMediaState, refresh: GroupRelayRefresh?) {
+		if let refresh {
+			relayHost = refresh.host
+			relayPort = refresh.port
+			relayToken = refresh.token
+			integrityKey = refresh.integrityKey
+		}
+
+		let transaction = Data((0..<12).map { _ in UInt8.random(in: 0...255) })
+		guard let request = CallRelayAllocate.groupRequest(
+			transactionID: transaction,
+			relayToken: relayToken,
+			relayIPv4: relayHost,
+			relayPort: relayPort,
+			integrityKey: integrityKey,
+			streams: group.streams,
+			participantPIDs: group.registry.activePIDs
+		) else {
+			return
+		}
+
+		allocateRequest = request
+		allocateTransactionID = transaction
+	}
+
+	private func commitGroupAllocate(
+		_ group: GroupMediaState,
+		refresh: GroupRelayRefresh?,
+		subscriptionsChanged: Bool
+	) async {
+		let addressChanged = refresh.map { $0.host != relayHost || $0.port != relayPort } ?? false
+		let credentialsChanged = refresh.map { $0.token != relayToken || $0.integrityKey != integrityKey } ?? false
+		guard addressChanged || credentialsChanged || subscriptionsChanged else {
+			return
+		}
+
+		adoptAllocation(group, refresh: refresh)
+		if addressChanged || credentialsChanged {
+			// New credentials invalidate the allocation, even on the same relay. A move starts the wait
+			// for an answer once it has connected, since dialing is not the relay being slow to answer.
+			isAllocated = false
+			allocatePendingSince = addressChanged ? nil : clock.now
+		}
+		guard isRunning else {
+			return
+		}
+
+		if addressChanged {
+			await reconnectRelay()
+		}
+		await transmitAllocate()
+	}
+
+	private func transmitAllocate() async {
+		try? await link.send(allocateRequest)
+	}
+
+	/// Moves to the relay a new allocation names. Nothing can be sent or heard until it answers.
+	private func reconnectRelay() async {
+		WhatsAppLog.logger.notice("call \(self.configuration.callID, privacy: .public): moving to relay \(self.relayHost, privacy: .public):\(self.relayPort)")
+		let previous = link
+		receiveTask?.cancel()
+		let replacement = linkFactory(relayHost, relayPort)
+		link = replacement
+		listenToLink()
+		let generation = linkGeneration
+		await previous.close()
+		// Each await is a chance to have hung up, or to have moved again.
+		guard isRunning, generation == linkGeneration else {
+			await replacement.close()
+			return
+		}
+
+		do {
+			try await replacement.open()
+			guard isRunning, generation == linkGeneration else {
+				await replacement.close()
+				return
+			}
+
+			allocatePendingSince = clock.now
+		} catch {
+			guard isRunning, generation == linkGeneration else {
+				return
+			}
+
+			WhatsAppLog.logger.error("call \(self.configuration.callID, privacy: .public): relay move failed: \(String(describing: error), privacy: .public)")
+			peerGoneContinuation.yield()
+		}
+	}
+
+	/// Moves what this side sends to the key the registry has installed. Everything derives before any
+	/// live stream changes, so a failure leaves them all on the last key.
+	private func syncGroupEpoch(_ group: GroupMediaState) {
+		guard let epoch = group.registry.installedEpoch,
+			  group.localEpochTransaction.map({ epoch.transactionID > $0 }) ?? true,
+			  let sendKeys = try? CallMediaCrypto.deriveRTCPKeys(callKey: epoch.key, participantID: participantID) else {
+			return
+		}
+
+		var audio = pipeline
+		var pictures = video
+		do {
+			try audio.rekeySend(callKey: epoch.key, selfParticipantID: participantID)
+			try pictures.rekeySend(callKey: epoch.key, selfParticipantID: participantID)
+		} catch {
+			return
+		}
+
+		pipeline = audio
+		video = pictures
+		rtcpSendKeys = sendKeys
+		cname = CallRTCP.cname(ssrc: video.ssrc, callKey: epoch.key)
+		audioCNAME = CallRTCP.cname(ssrc: audioSSRC, callKey: epoch.key)
+		group.localEpochTransaction = epoch.transactionID
+		group.isDirectFallbackActive = false
+		// What is kept for NACKs is protected under the last key, which a removed member still holds.
+		sentHistory = [:]
+		sentOrder = []
+		group.mixer.retain(group.registry.activeParticipantIDs)
+		// The first decryptable media for someone just admitted must not depend on an earlier picture.
+		forceKeyframe()
+	}
+
+	private func forceKeyframe() {
+		keyframeAnnounced = false
+		requireKeyframe()
+	}
+
+	// MARK: Receiving
+
+	private func handleGroupRTP(_ message: Data, header: CallRTPHeader, group: GroupMediaState) async {
+		// A requested key retires the last one at once, so a removed member cannot go on sending under it.
+		guard group.isEpochReady else {
+			return
+		}
+
+		if header.payloadType == CallVideoRTPHeader.h264PayloadType {
+			await handleGroupVideo(message, header: header, group: group)
+		} else if CallRTPHeader.isAudioPayloadType(header.payloadType) {
+			handleGroupAudio(message, header: header, group: group)
+		} else if let id = group.registry.participantID(forSlot: header.ssrc),
+				  let carried = try? group.registry.unprotectAuxiliary(message, from: id) {
+			decodeCarriedAudio(carried, from: id, group: group)
+		}
+	}
+
+	private func handleGroupAudio(_ message: Data, header: CallRTPHeader, group: GroupMediaState) {
+		// Without a route it is not addressed to anyone this call knows, such as a straggler from someone
+		// who just left, and no key was tried on it.
+		guard let id = group.registry.participantID(forAudio: header.ssrc) else {
+			return
+		}
+
+		do {
+			guard let received = try group.registry.unprotectAudio(message, from: id) else {
+				return
+			}
+
+			group.audioReception[id, default: CallRTPReceptionStats()].observe(
+				ssrc: header.ssrc,
+				sequence: header.sequenceNumber,
+				timestamp: header.timestamp,
+				arrivalMs: monotonicMs(),
+				payload: received.payload.count
+			)
+			decodeGroupAudio(received.payload, from: id, group: group)
+		} catch CallAudioPipeline.ReceiveError.authenticationFailed {
+			packetsRejected += 1
+			keysRejected += 1
+		} catch {
+			packetsRejected += 1
+		}
+	}
+
+	private func handleGroupVideo(_ message: Data, header: CallRTPHeader, group: GroupMediaState) async {
+		guard let id = group.registry.participantID(forVideo: header.ssrc) else {
+			return
+		}
+
+		let received: CallVideoPipeline.Received
+		do {
+			guard let unprotected = try group.registry.unprotectVideo(message, from: id) else {
+				return
+			}
+
+			received = unprotected
+		} catch {
+			videoPacketsRejected += 1
+			if case CallAudioPipeline.ReceiveError.authenticationFailed = error {
+				keysRejected += 1
+			}
+			return
+		}
+
+		decodeCarriedAudio(received.carriedAudio, from: id, group: group)
+		guard received.isCurrentStream else {
+			return
+		}
+
+		group.videoReception[id, default: CallRTPReceptionStats()].observe(
+			ssrc: received.header.ssrc,
+			sequence: received.header.sequenceNumber,
+			timestamp: received.header.timestamp,
+			arrivalMs: monotonicMs(),
+			payload: received.payloadBytes
+		)
+		if received.lost > 0 {
+			videoPacketsLost += Int(received.lost)
+		}
+		for frame in received.frames {
+			videoFramesReceived += 1
+			if frame.isKeyframe {
+				group.keyframePending.remove(id)
+			}
+			receivedParticipantVideoContinuation.yield(CallParticipantVideoFrame(participantID: id, frame: frame))
+		}
+		if received.lost > 0 {
+			await requestParticipantKeyframe(id)
+		}
+	}
+
+	private func decodeCarriedAudio(_ packet: Data?, from id: String, group: GroupMediaState) {
+		guard let packet, let received = group.registry.acceptCarriedAudio(packet, from: id) else {
+			return
+		}
+
+		carriedAudioPackets += 1
+		decodeGroupAudio(received.payload, from: id, group: group)
+	}
+
+	/// Each participant has a decoder of their own: these codecs carry state from frame to frame, and one
+	/// shared across speakers would corrupt all of them.
+	private func decodeGroupAudio(_ opus: Data, from id: String, group: GroupMediaState) {
+		do {
+			let decoder: CallOpusDecoder
+			if let existing = group.decoders[id] {
+				decoder = existing
+			} else {
+				decoder = try CallOpusDecoder()
+				group.decoders[id] = decoder
+			}
+
+			let pcm = try decoder.decode(opus)
+			framesReceived += 1
+			for sample in pcm {
+				decodedPeak = max(decodedPeak, abs(Int(sample)))
+			}
+			group.mixer.push(id, pcm)
+		} catch {
+			packetsRejected += 1
+			decodeFailures += 1
+			if decodeFailures <= 5 {
+				let first = opus.prefix(4).map { String(format: "%02x", $0) }.joined()
+				WhatsAppLog.logger.notice("call \(self.configuration.callID, privacy: .public): undecodable group audio from \(id, privacy: .public) bytes=\(opus.count) first=\(first, privacy: .public)")
+			}
+		}
+	}
+
+	private func handleGroupRTCP(_ message: Data, sender: UInt32, group: GroupMediaState) async {
+		// A requested key retires the shared RTCP keys along with the media ones. A high index accepted
+		// under the old key would also advance a replay window that outlives it.
+		guard group.isEpochReady,
+			  let id = group.registry.participantID(forSlot: sender),
+			  let keys = group.registry.rtcpKeys(for: id),
+			  let (plain, index) = CallMediaCrypto.unprotectRTCP(message, keys: keys, senderSSRC: sender),
+			  group.rtcpReplay[id, default: CallSRTCPReplayWindow()].accept(sender: sender, index: index),
+			  let summary = CallRTCP.parse(plain) else {
+			return
+		}
+
+		rtcpAccepted += 1
+		for timing in summary.senderTimings {
+			group.audioReception[id]?.observeSenderReport(ssrc: timing.ssrc, compactNTP: timing.compactNTP, arrivalMs: monotonicMs())
+			group.videoReception[id]?.observeSenderReport(ssrc: timing.ssrc, compactNTP: timing.compactNTP, arrivalMs: monotonicMs())
+		}
+		await applyFeedback(summary)
+	}
+
+	/// Asks one participant for a keyframe, for a decoder that lost or cannot use a picture. Throttled, so
+	/// calling it for every such picture is fine.
+	///
+	/// The engine this follows sends none in a group, unsure whether a request travels end to end past
+	/// the relay. Peers do honor one addressed to them, and a lost picture otherwise waits for the sender's
+	/// next periodic keyframe, so it is worth asking.
+	public func requestParticipantKeyframe(_ id: String) async {
+		guard isRunning, isAllocated, let group,
+			  let videoSSRC = group.registry.receivers[id]?.videoSSRC else {
+			return
+		}
+
+		if let asked = group.keyframeAskedAt[id], asked.duration(to: clock.now) < Self.peerKeyframeInterval {
+			group.keyframePending.insert(id)
+			return
+		}
+
+		group.keyframeAskedAt[id] = clock.now
+		group.keyframePending.remove(id)
+		keyframesRequestedFromPeer += 1
+		await sendRTCP(CallRTCP.pictureLossIndication(senderSSRC: video.ssrc, mediaSSRC: videoSSRC))
+	}
+
+	/// One Sender Report per stream received, since each participant reads the block about their own.
+	private func sendGroupReports(_ group: GroupMediaState) async {
+		guard isRunning, isAllocated, group.isEpochReady else {
+			return
+		}
+
+		for id in group.keyframePending {
+			await requestParticipantKeyframe(id)
+		}
+
+		let now = monotonicMs()
+		let wallclock = UInt64(Date().timeIntervalSince1970 * 1000)
+		var audioReports = [CallRTCP.ReceptionReport?]()
+		for id in Array(group.audioReception.keys) {
+			audioReports.append(group.audioReception[id]?.report(nowMs: now))
+		}
+		for report in audioReports.isEmpty ? [nil] : audioReports {
+			await sendRTCP(CallRTCP.senderReport(
+				ssrc: audioSSRC,
+				rtpTimestamp: pipeline.nextTimestamp,
+				packetsSent: audioPacketsSent,
+				octetsSent: audioOctetsSent,
+				wallclockMs: wallclock,
+				cname: audioCNAME,
+				report: report
+			), senderSSRC: audioSSRC)
+		}
+
+		guard isSendingVideo || !group.videoReception.isEmpty else {
+			return
+		}
+
+		var videoReports = [CallRTCP.ReceptionReport?]()
+		for id in Array(group.videoReception.keys) {
+			videoReports.append(group.videoReception[id]?.report(nowMs: now))
+		}
+		for report in videoReports.isEmpty ? [nil] : videoReports {
+			await sendRTCP(videoSenderReport(report: report))
+		}
+	}
+
+	// MARK: Playout
+
+	private func startPlayout() {
+		guard playoutTask == nil else {
+			return
+		}
+
+		playoutTask = Task { [weak self] in
+			while !Task.isCancelled {
+				try? await Task.sleep(for: Self.groupPlayoutInterval)
+				await self?.drainMixer()
+			}
+		}
+	}
+
+	/// Plays what the mixer has on a steady clock. Silence is simply not played: the device needs no
+	/// filler, and a late tick catches up rather than letting the queues run ahead of real time.
+	private func drainMixer() {
+		guard isRunning, let group else {
+			return
+		}
+
+		let now = clock.now
+		var next = group.nextPlayout ?? now
+		// Far behind, as after sleep: resume from now rather than playing out a backlog at once.
+		if next.duration(to: now) > .milliseconds(200) {
+			next = now
+		}
+		while next <= now {
+			let first = group.mixer.mixChunk()
+			let second = group.mixer.mixChunk()
+			if first != nil || second != nil {
+				let silence = [Int16](repeating: 0, count: CallGroupAudioMixer.chunkSamples)
+				receivedContinuation.yield((first ?? silence) + (second ?? silence))
+			}
+			next += Self.groupPlayoutInterval
+		}
+		group.nextPlayout = next
 	}
 }

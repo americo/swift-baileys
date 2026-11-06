@@ -329,6 +329,106 @@ public enum CallStanzaBuilder {
 		return wrap(to: to, stanzaID: stanzaID, action: action("relaylatency", callID, callCreator, children))
 	}
 
+	// MARK: Group calls
+
+	/// The initial `<offer>` of a group call, sent to the call scope: audio → [video] → net → group_info.
+	/// It carries no key. The ack names who distributes the first one, by `enc_rekey`.
+	public static func groupOffer(
+		callID: String,
+		callCreator: String,
+		stanzaID: String,
+		groupJID: String?,
+		participants: [GroupCallParticipant],
+		audioRate: String = "16000",
+		video: Bool = false
+	) -> BinaryNode {
+		var children = [audioNode(audioRate)]
+		if video {
+			// The group shape: its decoder names and geometry differ from a 1:1 offer's on purpose.
+			children.append(BinaryNode(tag: "video", attrs: BinaryNodeAttributes([
+				("enc", "h264"),
+				("dec", "h264"),
+				("orientation", "0"),
+				("screen_width", "1920"),
+				("screen_height", "1080"),
+				("device_orientation", uprightOrientation)
+			])))
+		}
+		children.append(BinaryNode(tag: "net", attrs: ["medium": "3"]))
+		children.append(BinaryNode(tag: "group_info", content: .nodes(participants.map(groupUserNode))))
+
+		return wrap(
+			to: groupCallScope(callID: callID),
+			stanzaID: stanzaID,
+			action: BinaryNode(
+				tag: "offer",
+				attrs: BinaryNodeAttributes.trimmingUndefined([
+					("call-id", callID),
+					("call-creator", callCreator),
+					("group-jid", groupJID)
+				]),
+				content: .nodes(children)
+			)
+		)
+	}
+
+	/// `<enc_rekey>`: one shared media key, encrypted for one device.
+	public static func groupEncRekey(
+		callID: String,
+		callCreator: String,
+		stanzaID: String,
+		transactionID: UInt32,
+		deviceKey: CallOfferDeviceKey,
+		deviceIdentity: Data? = nil
+	) -> BinaryNode {
+		var children = [encoptNode, encNode(deviceKey)]
+		if let deviceIdentity {
+			children.append(BinaryNode(tag: "device-identity", content: .data(deviceIdentity)))
+		}
+
+		return wrap(to: deviceKey.deviceJID, stanzaID: stanzaID, action: BinaryNode(
+			tag: "enc_rekey",
+			attrs: BinaryNodeAttributes([
+				("call-id", callID),
+				("call-creator", callCreator),
+				("transaction-id", String(transactionID))
+			]),
+			content: .nodes(children)
+		))
+	}
+
+	/// `<mute_v2>`: this side announcing its own microphone.
+	public static func mute(
+		callID: String,
+		to: String,
+		callCreator: String,
+		stanzaID: String,
+		muted: Bool
+	) -> BinaryNode {
+		wrap(to: to, stanzaID: stanzaID, action: BinaryNode(
+			tag: "mute_v2",
+			attrs: BinaryNodeAttributes([
+				("call-id", callID),
+				("call-creator", callCreator),
+				("mute-state", muted ? "1" : "0")
+			])
+		))
+	}
+
+	private static func groupUserNode(_ participant: GroupCallParticipant) -> BinaryNode {
+		BinaryNode(
+			tag: "user",
+			attrs: BinaryNodeAttributes.trimmingUndefined([("jid", participant.jid), ("state", participant.state)]),
+			content: .nodes(participant.devices.map { device in
+				guard !device.capability.isEmpty else {
+					return BinaryNode(tag: "device", attrs: ["jid": device.jid])
+				}
+
+				return BinaryNode(tag: "device", attrs: ["jid": device.jid], content: .nodes([capabilityNode(device.capability)]))
+			})
+		)
+	}
+
 	/// `<receipt>` for an incoming `<offer>`; this is what makes the caller's phone show "ringing".
 	public static func offerReceipt(
 		callID: String,

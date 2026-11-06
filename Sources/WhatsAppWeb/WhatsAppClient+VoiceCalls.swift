@@ -10,6 +10,8 @@ public enum WhatsAppVoiceCallError: Error, Equatable, Sendable {
 	case peerLIDUnknown(String)
 	case missingRelay
 	case offerRejected(String)
+	/// More members than a call holds, counting this device.
+	case groupTooLarge(Int)
 }
 
 /// An outgoing voice call whose `<offer>` was accepted by the server.
@@ -382,7 +384,7 @@ extension WhatsAppClient {
 	}
 
 	/// A phone-number JID mapped to its LID, or the JID unchanged when it already is one.
-	private func resolvePeerLID(_ peer: String) async throws -> String {
+	func resolvePeerLID(_ peer: String) async throws -> String {
 		if peer.hasSuffix("@lid") {
 			return peer
 		}
@@ -394,7 +396,7 @@ extension WhatsAppClient {
 		return lid.contains("@") ? lid : "\(lid)@lid"
 	}
 
-	private var ownDeviceJIDs: [String] {
+	var ownDeviceJIDs: [String] {
 		guard let me = authenticationState?.credentials.me else {
 			return []
 		}
@@ -443,7 +445,7 @@ extension WhatsAppClient {
 		return beforeAt.split(separator: ":", maxSplits: 1).first.map(String.init) ?? beforeAt
 	}
 
-	private func deviceIdentityIfNeeded(for keys: [CallOfferDeviceKey]) throws -> Data? {
+	func deviceIdentityIfNeeded(for keys: [CallOfferDeviceKey]) throws -> Data? {
 		guard keys.contains(where: { $0.encryptionType == "pkmsg" }),
 			  let account = authenticationState?.credentials.account else {
 			return nil

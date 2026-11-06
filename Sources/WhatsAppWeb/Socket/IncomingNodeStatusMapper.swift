@@ -34,6 +34,12 @@ public enum IncomingCallStatusMapper {
 			.accept
 		case "video":
 			.video
+		case "group_update":
+			.groupUpdate
+		case "enc_rekey":
+			.groupEpoch
+		case "mute_v2":
+			.mute
 		default:
 			.ringing
 		}

@@ -123,6 +123,8 @@ public actor WhatsAppClient {
 	var callOfferCache: [String: WhatsAppCallEvent] = [:]
 	/// Raw `<call>` stanzas of offers still ringing, kept so the call key can be decrypted on accept.
 	var callOfferNodes: [String: BinaryNode] = [:]
+	/// Rosters and media keys of group calls, ahead of whichever media session ends up using them.
+	var groupCalls: [String: GroupCallRecord] = [:]
 	var recentSentMessages: [RecentSentMessageKey: RecentSentMessage] = [:]
 	var recentSentMessageOrder: [RecentSentMessageKey] = []
 	var retryResendCounts: [RetryResendKey: Int] = [:]

@@ -45,6 +45,8 @@ public struct CallRelayData: Equatable, Sendable {
 	public var relayTokens: [Data]
 	public var authTokens: [Data]
 	public var endpoints: [CallRelayEndpoint]
+	/// Numbers a group call's relay allocations, on their own count apart from its roster transactions.
+	public var transactionID: UInt32? = nil
 
 	/// Port the WhatsApp Web client dials; preferred when an endpoint offers it.
 	public static let webClientPort: UInt16 = 3480
@@ -101,6 +103,8 @@ public struct CallRelayData: Equatable, Sendable {
 			.flatMap { String(data: $0, encoding: .utf8) }
 			.flatMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
 			.flatMap { $0 > 0 ? $0 : nil }
+			// A group relay states it as an attribute.
+			?? relay.attrs["warp_mi_tag_len"].flatMap(Int.init).flatMap { $0 > 0 ? $0 : nil }
 
 		return CallRelayData(
 			hopByHopKey: hbhBytes.flatMap(decodeHopByHopKey),
@@ -113,7 +117,8 @@ public struct CallRelayData: Equatable, Sendable {
 			peerPID: relay.attrs["peer_pid"].flatMap(UInt32.init),
 			relayTokens: indexedTokens(children, tag: "token"),
 			authTokens: indexedTokens(children, tag: "auth_token"),
-			endpoints: parseEndpoints(children)
+			endpoints: parseEndpoints(children),
+			transactionID: relay.attrs["transaction-id"].flatMap(UInt32.init)
 		)
 	}
 

@@ -133,8 +133,8 @@ public struct CallAudioPipeline {
 		case replayed
 	}
 
-	private let sendKeys: CallSRTPKeys
-	private let receiveKeys: CallSRTPKeys
+	private var sendKeys: CallSRTPKeys
+	private var receiveKeys: CallSRTPKeys
 	private let tagLength: Int
 	private let ssrc: UInt32
 	private let payloadType: UInt8
@@ -145,6 +145,11 @@ public struct CallAudioPipeline {
 	private var sendROC: UInt32 = 0
 	private var lastSentSequence: UInt16?
 	private var receiveStreams: [UInt32: ReceiveStream] = [:]
+
+	/// The RTP timestamp the next packet will carry, which is where this stream's clock stands.
+	var nextTimestamp: UInt32 {
+		timestamp
+	}
 
 	private static let maxReceiveStreams = 8
 
@@ -173,6 +178,23 @@ public struct CallAudioPipeline {
 		self.ssrc = ssrc
 		self.payloadType = payloadType
 		self.samplesPerPacket = samplesPerPacket
+	}
+
+	/// Moves sending to a new group media key. Sequence numbers and the rollover counter carry on: it is
+	/// the same stream, and only what protects it has changed.
+	public mutating func rekeySend(callKey: Data, selfParticipantID: String) throws {
+		sendKeys = try CallMediaCrypto.deriveRTPKeys(
+			callKey: callKey,
+			participantID: CallMediaCrypto.formatParticipantID(selfParticipantID)
+		)
+	}
+
+	/// Moves receiving to a new group media key, keeping each stream's rollover state and replay window.
+	public mutating func rekeyReceive(callKey: Data, peerParticipantID: String) throws {
+		receiveKeys = try CallMediaCrypto.deriveRTPKeys(
+			callKey: callKey,
+			participantID: CallMediaCrypto.formatParticipantID(peerParticipantID)
+		)
 	}
 
 	/// Wraps one Opus frame: header, encrypted payload, WARP tag.
