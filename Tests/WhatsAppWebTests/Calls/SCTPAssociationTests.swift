@@ -226,4 +226,42 @@ struct SCTPAssociationTests {
 		#expect(!SCTPAssociation.serialGreater(5, 5))
 		#expect(SCTPAssociation.serialGreater(0, UInt32.max))
 	}
+
+	@Test("send pressure reports what was sent, abandoned, and how slowly it was acknowledged")
+	func sendPressure() throws {
+		var client = SCTPAssociation(role: .client)
+		var server = SCTPAssociation(role: .server)
+		client.connect(now: 0)
+		func shuttle(now: UInt64) {
+			var moved = true
+			while moved {
+				moved = false
+				while let packet = client.pollTransmit() {
+					server.receive(packet, now: now)
+					moved = true
+				}
+				while let packet = server.pollTransmit() {
+					client.receive(packet, now: now)
+					moved = true
+				}
+			}
+		}
+		shuttle(now: 0)
+		#expect(client.state == .established)
+		_ = client.takeSendPressure()
+
+		try client.send(Data([1]), now: 1_000)
+		shuttle(now: 1_120)
+		let acked = client.takeSendPressure()
+		#expect(acked == SCTPAssociation.SendPressure(sent: 1, abandoned: 0, ackDelayMs: 120))
+
+		// A packet that never arrives is given up on.
+		try client.send(Data([2]), now: 2_000)
+		_ = client.pollTransmit()
+		client.handleTimeout(now: 2_000 + SCTPAssociation.retransmissionTimeoutMs)
+		let lost = client.takeSendPressure()
+		#expect(lost.sent == 1)
+		#expect(lost.abandoned == 1)
+		#expect(client.takeSendPressure() == SCTPAssociation.SendPressure())
+	}
 }

@@ -30,6 +30,22 @@ public struct SCTPAssociation {
 		case notEstablished
 	}
 
+	/// How the path to the peer is coping, since the last time this was read.
+	public struct SendPressure: Equatable, Sendable {
+		/// Chunks sent.
+		public var sent = 0
+		/// Chunks given up on, unacknowledged after `retransmissionTimeoutMs`.
+		public var abandoned = 0
+		/// How long the newest acknowledged chunk took, in milliseconds.
+		public var ackDelayMs: UInt64?
+
+		public init(sent: Int = 0, abandoned: Int = 0, ackDelayMs: UInt64? = nil) {
+			self.sent = sent
+			self.abandoned = abandoned
+			self.ackDelayMs = ackDelayMs
+		}
+	}
+
 	// MARK: Constants
 
 	public static let defaultPort: UInt16 = 5000
@@ -104,6 +120,7 @@ public struct SCTPAssociation {
 
 	private var outbox: [Data] = []
 	private var events: [Event] = []
+	private var pressure = SendPressure()
 
 	private var handshakePacket: Data?
 	private var handshakeDeadline: UInt64?
@@ -152,6 +169,12 @@ public struct SCTPAssociation {
 		events.isEmpty ? nil : events.removeFirst()
 	}
 
+	/// Hands back what the send path has seen since the previous call.
+	public mutating func takeSendPressure() -> SendPressure {
+		defer { pressure = SendPressure() }
+		return pressure
+	}
+
 	/// The next millisecond timestamp at which `handleTimeout` should be called.
 	public func pollTimeout() -> UInt64? {
 		var deadline = handshakeDeadline
@@ -185,6 +208,7 @@ public struct SCTPAssociation {
 		}
 
 		if peerSupportsForwardTSN {
+			pressure.abandoned += expired.count
 			expired.forEach { outstanding.removeValue(forKey: $0) }
 			advancePeerAckPoint()
 		} else {
@@ -236,6 +260,7 @@ public struct SCTPAssociation {
 			value += piece
 			let dataChunk = chunk(ChunkType.data, flags, value)
 			outstanding[tsn] = Outstanding(chunk: dataChunk, sentAt: now)
+			pressure.sent += 1
 			outbox.append(makePacket(verificationTag: peerTag, chunks: [dataChunk]))
 		}
 	}
@@ -299,7 +324,7 @@ public struct SCTPAssociation {
 					needsSACK = true
 				}
 			case ChunkType.sack:
-				handleSACK(chunk.value)
+				handleSACK(chunk.value, now: now)
 			case ChunkType.forwardTSN:
 				if state == .established {
 					handleForwardTSN(chunk.value)
@@ -523,12 +548,15 @@ public struct SCTPAssociation {
 		return chunk(ChunkType.sack, 0, value)
 	}
 
-	private mutating func handleSACK(_ value: [UInt8]) {
+	private mutating func handleSACK(_ value: [UInt8], now: UInt64) {
 		guard state == .established, value.count >= 12 else {
 			return
 		}
 
 		let cumulative = read32(value, 0)
+		if let newest = outstanding.filter({ !Self.serialGreater($0.key, cumulative) }).values.map(\.sentAt).max() {
+			pressure.ackDelayMs = now >= newest ? now - newest : 0
+		}
 		outstanding = outstanding.filter { Self.serialGreater($0.key, cumulative) }
 		if Self.serialGreater(cumulative, peerAckPoint) {
 			peerAckPoint = cumulative
@@ -543,7 +571,9 @@ public struct SCTPAssociation {
 			}
 
 			for offset in start...end {
-				outstanding.removeValue(forKey: cumulative &+ offset)
+				if let acked = outstanding.removeValue(forKey: cumulative &+ offset) {
+					pressure.ackDelayMs = now >= acked.sentAt ? now - acked.sentAt : 0
+				}
 			}
 		}
 	}

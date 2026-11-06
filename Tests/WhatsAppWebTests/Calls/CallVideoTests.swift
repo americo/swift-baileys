@@ -875,6 +875,126 @@ struct CallSessionVideoTests {
 		await bob.stop()
 	}
 
+	private final class PressureLink: CallRelayLink, @unchecked Sendable {
+		let messages: AsyncStream<Data>
+		private let continuation: AsyncStream<Data>.Continuation
+		private let lock = NSLock()
+		private var next: SCTPAssociation.SendPressure?
+
+		init() {
+			(messages, continuation) = AsyncStream.makeStream()
+		}
+
+		func set(_ pressure: SCTPAssociation.SendPressure) {
+			lock.withLock { next = pressure }
+		}
+
+		func open() async throws {}
+		func send(_ message: Data) async throws {
+			if CallSTUN.isSTUN(message), CallSTUN.messageType(message) == CallSTUN.allocateRequest {
+				let transaction = CallSTUN.transactionID(message) ?? Data(count: 12)
+				continuation.yield(CallSTUN.encode(type: CallSTUN.allocateSuccess, transactionID: transaction))
+			}
+		}
+		func close() async { continuation.finish() }
+		func sendPressure() async -> SCTPAssociation.SendPressure? {
+			lock.withLock {
+				defer { next = nil }
+				return next
+			}
+		}
+	}
+
+	private func pressureSession() async throws -> (CallSession, PressureLink) {
+		let link = PressureLink()
+		let session = try CallSession(
+			configuration: CallSession.Configuration(
+				callID: "00112233445566778899AABBCCDDEEFF",
+				selfParticipantID: aliceLID,
+				peerParticipantID: bobLID,
+				callKey: callKey,
+				relay: relayData
+			),
+			link: link
+		)
+		try await session.start()
+		await session.setVideoSending(true)
+		return (session, link)
+	}
+
+	private func bitrates(_ session: CallSession) -> Task<[Int], Never> {
+		Task {
+			var values = [Int]()
+			for await event in session.videoSendEvents {
+				if case let .targetBitrate(value) = event {
+					values.append(value)
+				}
+			}
+			return values
+		}
+	}
+
+	@Test("a slow path lowers the bitrate with no report from the peer")
+	func pressureLowersBitrate() async throws {
+		let (session, link) = try await pressureSession()
+		let reader = bitrates(session)
+
+		link.set(.init(sent: 100, abandoned: 0, ackDelayMs: 400))
+		await session.adaptToLink()
+		link.set(.init(sent: 100, abandoned: 40, ackDelayMs: nil))
+		await session.adaptToLink()
+		link.set(.init(sent: 100, abandoned: 0, ackDelayMs: 900))
+		await session.adaptToLink()
+		await session.stop()
+
+		// 20% off for a slow path, 40% off for a bad one, and never below the floor.
+		let values = await reader.value
+		#expect(values.count == 3)
+		#expect(values.first == Int(Double(CallSession.initialVideoBitrate) * 0.8))
+		#expect(abs((values.dropFirst().first ?? 0) - Int(Double(values[0]) * 0.6)) <= 1)
+		#expect(values.last == CallSession.minimumVideoBitrate)
+	}
+
+	@Test("a healthy path leaves the bitrate alone")
+	func healthyPath() async throws {
+		let (session, link) = try await pressureSession()
+		let reader = bitrates(session)
+
+		link.set(.init(sent: 100, abandoned: 1, ackDelayMs: 60))
+		await session.adaptToLink()
+		await session.adaptToLink()
+		await session.stop()
+
+		#expect(await reader.value.isEmpty)
+	}
+
+	@Test("the bitrate never falls below its floor")
+	func pressureFloor() async throws {
+		let (session, link) = try await pressureSession()
+		let reader = bitrates(session)
+
+		for _ in 0..<12 {
+			link.set(.init(sent: 10, abandoned: 10))
+			await session.adaptToLink()
+		}
+		await session.stop()
+
+		#expect(await reader.value.last == CallSession.minimumVideoBitrate)
+	}
+
+	@Test("a call that sends no video has nothing to slow down")
+	func pressureWithoutVideo() async throws {
+		let (session, link) = try await pressureSession()
+		await session.setVideoSending(false)
+		let reader = bitrates(session)
+
+		link.set(.init(sent: 100, abandoned: 90, ackDelayMs: 2_000))
+		await session.adaptToLink()
+		await session.stop()
+
+		#expect(await reader.value.isEmpty)
+	}
+
 	@Test("audio arriving inside video and FEC packets is played, and only once")
 	func carriedAudio() async throws {
 		let (alice, bob, relay) = try await legs()

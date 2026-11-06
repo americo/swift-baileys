@@ -7,6 +7,15 @@ public protocol CallRelayLink: Sendable {
 	func open() async throws
 	func send(_ message: Data) async throws
 	func close() async
+	/// How the path toward the relay is coping since the last time this was read. It answers from this
+	/// side alone, so it still speaks when the congestion has stopped the peer's reports from arriving.
+	func sendPressure() async -> SCTPAssociation.SendPressure?
+}
+
+extension CallRelayLink {
+	public func sendPressure() async -> SCTPAssociation.SendPressure? {
+		nil
+	}
 }
 
 extension CallRelayTransport: CallRelayLink {
@@ -67,17 +76,20 @@ public actor CallSession {
 	/// it as consent to keep forwarding.
 	public static let keepaliveInterval: Duration = .seconds(1)
 	/// How long the peer can send nothing at all before the call is taken to be over. Official clients
-	/// send RTCP every 1.5 s even while muted, so this is not silence on the line but a peer that is gone.
-	public static let defaultPeerSilenceTimeout: Duration = .seconds(10)
+	/// send RTCP every 1.5 s even while muted, so silence this long means a dead path or a peer that has
+	/// gone. A congested link has been seen to hold everything back for over 10 s with the peer still in
+	/// the call, and its hang-up on the way, so the wait is long enough to outlast that.
+	public static let defaultPeerSilenceTimeout: Duration = .seconds(30)
 	/// Cadence of the reports each side sends about the video it receives and sends.
 	public static let reportInterval: Duration = .milliseconds(1500)
 	/// How long the peer's keyframe is waited on before asking again.
 	public static let peerKeyframeInterval: Duration = .seconds(1)
 	/// Floor under an urgent request, such as a decoder that has just failed on every picture.
 	public static let urgentPeerKeyframeInterval: Duration = .milliseconds(200)
-	/// Where the encoder starts, and what the loss reports may move it between. Without a measure of
-	/// the path, starting below the 2 Mbit/s official clients use costs less than starting above it.
-	public static let initialVideoBitrate = 1_200_000
+	/// Where the encoder starts, and what the path may move it between. Without a measure of the path,
+	/// starting low costs a softer picture for a few seconds, and starting too high has stalled whole
+	/// calls on a link that could not carry it, signaling included.
+	public static let initialVideoBitrate = 700_000
 	public static let minimumVideoBitrate = 250_000
 	public static let maximumVideoBitrate = 2_000_000
 
@@ -90,6 +102,12 @@ public actor CallSession {
 	private static let paceWindow: Duration = .seconds(1)
 	/// Sent packets kept to answer NACKs, longer than a NACK takes to come back over any path.
 	private static let sentHistorySize = 512
+	/// Backed off for this long after congestion, however clean the peer's reports look: they describe
+	/// what got through, and can arrive late.
+	private static let congestionHold: Duration = .seconds(10)
+	/// An acknowledgement this slow from a relay a few tens of milliseconds away means a queue has built.
+	private static let congestedAckDelayMs: UInt64 = 300
+	private static let severeAckDelayMs: UInt64 = 800
 	private static let maxResends = 2
 
 	/// Decoded PCM frames (16 kHz mono) from the peer.
@@ -151,6 +169,8 @@ public actor CallSession {
 	private var videoClockAnchor: (timestamp: UInt32, at: ContinuousClock.Instant)?
 	private var videoBitrate = CallSession.initialVideoBitrate
 	private var cleanReports = 0
+	private var congestedUntil: ContinuousClock.Instant?
+	private var linkPressure = SCTPAssociation.SendPressure()
 	private var paceNext: ContinuousClock.Instant?
 	private var paceSent = [(at: ContinuousClock.Instant, bytes: Int)]()
 	private var paceSentBytes = 0
@@ -306,6 +326,7 @@ public actor CallSession {
 			while !Task.isCancelled {
 				try? await Task.sleep(for: watchdogInterval)
 				await self?.checkPeerActivity()
+				await self?.adaptToLink()
 			}
 		}
 		if isSendingVideo {
@@ -680,7 +701,7 @@ public actor CallSession {
 		} else if fractionLost > 8 {
 			next = Int(Double(videoBitrate) * 0.95)
 			cleanReports = 0
-		} else {
+		} else if congestedUntil.map({ clock.now >= $0 }) ?? true {
 			cleanReports += 1
 			if cleanReports >= 3 {
 				next = Int(Double(videoBitrate) * 1.08)
@@ -688,13 +709,39 @@ public actor CallSession {
 			}
 		}
 
-		next = min(max(next, Self.minimumVideoBitrate), Self.maximumVideoBitrate)
+		setVideoBitrate(next)
+	}
+
+	private func setVideoBitrate(_ value: Int) {
+		let next = min(max(value, Self.minimumVideoBitrate), Self.maximumVideoBitrate)
 		guard next != videoBitrate else {
 			return
 		}
 
 		videoBitrate = next
 		videoSendEventsContinuation.yield(.targetBitrate(next))
+	}
+
+	/// Reads this side's own view of the path. The peer's loss reports cannot be the only signal: when
+	/// the uplink saturates, they stop arriving along with everything else, and the encoder would go on
+	/// feeding the queue that is stopping them.
+	func adaptToLink() async {
+		guard isRunning, isSendingVideo, let pressure = await link.sendPressure() else {
+			return
+		}
+
+		linkPressure = pressure
+		let delay = pressure.ackDelayMs ?? 0
+		let abandoned = pressure.sent > 0 ? Double(pressure.abandoned) / Double(pressure.sent) : 0
+		let severe = delay >= Self.severeAckDelayMs || abandoned >= 0.25
+		guard severe || delay >= Self.congestedAckDelayMs || abandoned >= 0.05 else {
+			return
+		}
+
+		WhatsAppLog.logger.notice("call \(self.configuration.callID, privacy: .public): congested ack=\(delay)ms abandoned=\(pressure.abandoned)/\(pressure.sent) bitrate=\(self.videoBitrate)")
+		congestedUntil = clock.now + Self.congestionHold
+		cleanReports = 0
+		setVideoBitrate(Int(Double(videoBitrate) * (severe ? 0.6 : 0.8)))
 	}
 
 	/// The periodic report, once video flows in either direction. It also retries a keyframe request
@@ -784,7 +831,7 @@ public actor CallSession {
 		}
 
 		let rtp = arrivedByPayloadType.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }.joined(separator: ",")
-		WhatsAppLog.logger.notice("call \(self.configuration.callID, privacy: .public): arrived rtp[\(rtp, privacy: .public)] rtcp=\(self.rtcpArrived)/\(self.rtcpAccepted) frames video=\(self.videoFramesReceived) audio=\(self.framesReceived) carried=\(self.carriedAudioPackets) rejected=\(self.videoPacketsRejected)/\(self.packetsRejected) sentVideo=\(self.videoFramesSent)")
+		WhatsAppLog.logger.notice("call \(self.configuration.callID, privacy: .public): arrived rtp[\(rtp, privacy: .public)] rtcp=\(self.rtcpArrived)/\(self.rtcpAccepted) frames video=\(self.videoFramesReceived) audio=\(self.framesReceived) carried=\(self.carriedAudioPackets) rejected=\(self.videoPacketsRejected)/\(self.packetsRejected) sentVideo=\(self.videoFramesSent) bitrate=\(self.videoBitrate) ack=\(self.linkPressure.ackDelayMs ?? 0)ms abandoned=\(self.linkPressure.abandoned)/\(self.linkPressure.sent)")
 		arrivedByPayloadType = [:]
 		rtcpArrived = 0
 		rtcpAccepted = 0

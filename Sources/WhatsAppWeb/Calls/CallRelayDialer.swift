@@ -72,6 +72,10 @@ public actor CallRelayDialer: CallRelayLink {
 		}
 	}
 
+	public func sendPressure() async -> SCTPAssociation.SendPressure? {
+		await winner?.sendPressure()
+	}
+
 	public func send(_ message: Data) async throws {
 		guard let winner else {
 			throw CallRelayTransportError.notConnected
