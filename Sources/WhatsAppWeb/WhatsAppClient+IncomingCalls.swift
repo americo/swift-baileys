@@ -14,6 +14,13 @@ extension WhatsAppClient {
 			return true
 		}
 
+		// Every call stanza, since a hang-up that goes unnoticed leaves nothing else to go on.
+		let actions = node.allChildren.map { child in
+			let attrs = child.attrs.map { "\($0.0)=\($0.1)" }.sorted().joined(separator: ",")
+			return "\(child.tag)(\(attrs))"
+		}.joined(separator: "+")
+		WhatsAppLog.logger.notice("call stanza from=\(node.attrs["from"] ?? "-", privacy: .public) participant=\(node.attrs["participant"] ?? "-", privacy: .public) \(actions, privacy: .public)")
+
 		guard let chatID = node.attrs["from"], let infoChild = node.allChildren.first else {
 			if let ack = StanzaAck.build(for: node) {
 				try? await sendNode(ack)

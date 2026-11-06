@@ -66,6 +66,9 @@ public actor CallSession {
 	/// The Allocate is re-sent with a fresh ping at this cadence for the whole call: the relay takes
 	/// it as consent to keep forwarding.
 	public static let keepaliveInterval: Duration = .seconds(1)
+	/// How long the peer can send nothing at all before the call is taken to be over. Official clients
+	/// send RTCP every 1.5 s even while muted, so this is not silence on the line but a peer that is gone.
+	public static let defaultPeerSilenceTimeout: Duration = .seconds(10)
 	/// Cadence of the reports each side sends about the video it receives and sends.
 	public static let reportInterval: Duration = .milliseconds(1500)
 	/// How long the peer's keyframe is waited on before asking again.
@@ -94,10 +97,17 @@ public actor CallSession {
 	/// Pictures from the peer. Only the newest few wait: stale video is worse than a dropped frame.
 	public nonisolated let receivedVideo: AsyncStream<CallVideoFrame>
 	public nonisolated let videoSendEvents: AsyncStream<CallVideoSendEvent>
+	/// Yields when the peer has stopped sending anything, or the relay path has closed. A hang-up does
+	/// not always reach this client as a stanza, and without this the call would stay up on its own.
+	public nonisolated let peerGone: AsyncStream<Void>
 
 	private let receivedContinuation: AsyncStream<[Int16]>.Continuation
 	private let receivedVideoContinuation: AsyncStream<CallVideoFrame>.Continuation
 	private let videoSendEventsContinuation: AsyncStream<CallVideoSendEvent>.Continuation
+	private let peerGoneContinuation: AsyncStream<Void>.Continuation
+	private let peerSilenceTimeout: Duration
+	private var lastPeerActivity: ContinuousClock.Instant?
+	private var watchdogTask: Task<Void, Never>?
 	private let configuration: Configuration
 	private let link: any CallRelayLink
 	private let relayToken: Data
@@ -165,7 +175,11 @@ public actor CallSession {
 	public private(set) var decodedPeak = 0
 
 	/// Builds a session. `link` defaults to the DTLS+SCTP transport to the relay the call selected.
-	public init(configuration: Configuration, link: (any CallRelayLink)? = nil) throws {
+	public init(
+		configuration: Configuration,
+		link: (any CallRelayLink)? = nil,
+		peerSilenceTimeout: Duration = CallSession.defaultPeerSilenceTimeout
+	) throws {
 		guard let endpoint = configuration.relay.mediaEndpoint(), let address = endpoint.primaryIPv4 else {
 			throw CallSessionError.noRelay
 		}
@@ -183,6 +197,7 @@ public actor CallSession {
 		let transaction = try CallKeyMessage.generateCallKey().prefix(12)
 
 		self.configuration = configuration
+		self.peerSilenceTimeout = peerSilenceTimeout
 		self.relayToken = configuration.relay.relayTokens[endpoint.tokenID]
 		self.integrityKey = key
 		self.relayHost = address.host
@@ -229,6 +244,7 @@ public actor CallSession {
 		self.receivedContinuation = continuation
 		(self.receivedVideo, self.receivedVideoContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(4))
 		(self.videoSendEvents, self.videoSendEventsContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(8))
+		(self.peerGone, self.peerGoneContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
 	}
 
 	/// Connects to the relay and waits for the Allocate to succeed.
@@ -278,6 +294,13 @@ public actor CallSession {
 			while !Task.isCancelled {
 				try? await Task.sleep(for: Self.reportInterval)
 				await self?.sendVideoReport()
+			}
+		}
+		let watchdogInterval = min(peerSilenceTimeout / 4, .seconds(1))
+		watchdogTask = Task { [weak self] in
+			while !Task.isCancelled {
+				try? await Task.sleep(for: watchdogInterval)
+				await self?.checkPeerActivity()
 			}
 		}
 		if isSendingVideo {
@@ -452,13 +475,16 @@ public actor CallSession {
 		keepaliveTask?.cancel()
 		receiveTask?.cancel()
 		reportTask?.cancel()
+		watchdogTask?.cancel()
 		keepaliveTask = nil
 		receiveTask = nil
 		reportTask = nil
+		watchdogTask = nil
 		await link.close()
 		receivedContinuation.finish()
 		receivedVideoContinuation.finish()
 		videoSendEventsContinuation.finish()
+		peerGoneContinuation.finish()
 	}
 
 	// MARK: Receiving
@@ -503,6 +529,7 @@ public actor CallSession {
 		} else {
 			// The peer's video FEC, retransmissions and app data, which carry its audio too.
 			if let audio = try? video.unprotectAuxiliary(message) {
+				lastPeerActivity = clock.now
 				handleCarriedAudio(audio)
 			}
 		}
@@ -512,6 +539,7 @@ public actor CallSession {
 		var received: CallAudioPipeline.Received?
 		do {
 			received = try pipeline.unprotect(message)
+			lastPeerActivity = clock.now
 			try decodeAudio(received?.payload ?? Data())
 		} catch CallAudioPipeline.ReceiveError.authenticationFailed {
 			packetsRejected += 1
@@ -522,7 +550,7 @@ public actor CallSession {
 			packetsRejected += 1
 			decodeFailures += 1
 			if decodeFailures <= 5, let received {
-				let first = received.payload.first.map { String(format: "%02x", $0) } ?? "-"
+				let first = received.payload.prefix(4).map { String(format: "%02x", $0) }.joined()
 				WhatsAppLog.logger.notice("call \(self.configuration.callID, privacy: .public): undecodable packet pt=\(received.header.payloadType) bytes=\(received.payload.count) first=\(first, privacy: .public)")
 			}
 		}
@@ -564,6 +592,7 @@ public actor CallSession {
 			return
 		}
 
+		lastPeerActivity = clock.now
 		handleCarriedAudio(received.carriedAudio)
 		guard received.isCurrentStream else {
 			return
@@ -608,6 +637,7 @@ public actor CallSession {
 			return
 		}
 
+		lastPeerActivity = clock.now
 		for timing in summary.senderTimings {
 			reception.observeSenderReport(ssrc: timing.ssrc, compactNTP: timing.compactNTP, arrivalMs: monotonicMs())
 		}
@@ -724,6 +754,20 @@ public actor CallSession {
 			return
 		}
 
+		WhatsAppLog.logger.notice("call \(self.configuration.callID, privacy: .public): relay path closed")
+		peerGoneContinuation.yield()
 		await stop()
+	}
+
+	/// Only authenticated traffic counts, so nothing but the peer can keep a call alive. A call that
+	/// has not heard from the peer yet waits, since media can take a moment to start.
+	private func checkPeerActivity() {
+		guard isRunning, let last = lastPeerActivity, last.duration(to: clock.now) >= peerSilenceTimeout else {
+			return
+		}
+
+		WhatsAppLog.logger.notice("call \(self.configuration.callID, privacy: .public): nothing from the peer for \(self.peerSilenceTimeout, privacy: .public)")
+		lastPeerActivity = nil
+		peerGoneContinuation.yield()
 	}
 }

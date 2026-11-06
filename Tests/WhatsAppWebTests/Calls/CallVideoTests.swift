@@ -915,6 +915,94 @@ struct CallSessionVideoTests {
 		await bob.stop()
 	}
 
+	private func quietLegs(timeout: Duration) async throws -> (alice: CallSession, bob: CallSession) {
+		let relay = VideoFakeRelay()
+		func configuration(_ me: String, _ peer: String) -> CallSession.Configuration {
+			CallSession.Configuration(
+				callID: "00112233445566778899AABBCCDDEEFF",
+				selfParticipantID: me,
+				peerParticipantID: peer,
+				callKey: callKey,
+				relay: relayData
+			)
+		}
+		let alice = try CallSession(
+			configuration: configuration(aliceLID, bobLID),
+			link: await VideoFakeLink(relay: relay, leg: 0),
+			peerSilenceTimeout: timeout
+		)
+		let bob = try CallSession(
+			configuration: configuration(bobLID, aliceLID),
+			link: await VideoFakeLink(relay: relay, leg: 1),
+			peerSilenceTimeout: timeout
+		)
+		try await alice.start()
+		try await bob.start()
+		return (alice, bob)
+	}
+
+	@Test("a peer that stops sending anything is reported gone, once")
+	func peerGoesSilent() async throws {
+		let (alice, bob) = try await quietLegs(timeout: .milliseconds(300))
+		let reports = Task { () -> Int in
+			var count = 0
+			for await _ in bob.peerGone {
+				count += 1
+			}
+			return count
+		}
+
+		await alice.setVideoSending(true)
+		try await alice.sendVideo(annexB([sps, pps, slice(type: 5, size: 100)]), timestamp: 0)
+		try await Task.sleep(for: .milliseconds(1_000))
+		await bob.stop()
+
+		#expect(await reports.value == 1)
+		await alice.stop()
+	}
+
+	@Test("a peer still sending is not reported gone")
+	func peerStaysActive() async throws {
+		let (alice, bob) = try await quietLegs(timeout: .milliseconds(400))
+		let reports = Task { () -> Int in
+			var count = 0
+			for await _ in bob.peerGone {
+				count += 1
+			}
+			return count
+		}
+
+		await alice.setVideoSending(true)
+		let delta = annexB([slice(type: 1, size: 100)])
+		try await alice.sendVideo(annexB([sps, pps, slice(type: 5, size: 100)]), timestamp: 0)
+		for index in 1...10 {
+			try await Task.sleep(for: .milliseconds(100))
+			try await alice.sendVideo(delta, timestamp: UInt32(index) * 4_500)
+		}
+		await bob.stop()
+
+		#expect(await reports.value == 0)
+		await alice.stop()
+	}
+
+	@Test("a call that never heard from the peer waits")
+	func neverHeard() async throws {
+		let (alice, bob) = try await quietLegs(timeout: .milliseconds(200))
+		let reports = Task { () -> Int in
+			var count = 0
+			for await _ in alice.peerGone {
+				count += 1
+			}
+			return count
+		}
+
+		try await Task.sleep(for: .milliseconds(600))
+		await alice.stop()
+
+		#expect(await reports.value == 0)
+		await bob.stop()
+	}
+
 	@Test("voice calls still cross with a video plane beside them")
 	func voiceUntouched() async throws {
 		let (alice, bob, _) = try await legs()
@@ -933,6 +1021,82 @@ struct CallSessionVideoTests {
 		#expect(await bob.videoPacketsRejected == 0)
 		await alice.stop()
 		await bob.stop()
+	}
+}
+
+@Suite("Opus packets holding several frames")
+struct CallOpusPacketTests {
+	private func tone(_ offset: Int) -> [Int16] {
+		(0..<960).map { Int16(9_000 * sin(2 * .pi * 300 * Double($0 + offset) / 16_000)) }
+	}
+
+	@Test("a one-frame packet passes through untouched")
+	func codeZero() {
+		let packet = Data([0x58, 1, 2, 3])
+		#expect(CallOpusPacket.frames(in: packet) == [packet])
+	}
+
+	@Test("code 1 splits into two equal frames, and needs an even body")
+	func codeOne() {
+		#expect(CallOpusPacket.frames(in: Data([0x59, 1, 2, 3, 4])) == [Data([0x58, 1, 2]), Data([0x58, 3, 4])])
+		#expect(CallOpusPacket.frames(in: Data([0x59, 1, 2, 3])) == nil)
+	}
+
+	@Test("code 2 reads the first frame's length, in one byte or two")
+	func codeTwo() {
+		#expect(CallOpusPacket.frames(in: Data([0x5a, 2, 1, 2, 3])) == [Data([0x58, 1, 2]), Data([0x58, 3])])
+
+		let body = [UInt8](repeating: 7, count: 300)
+		// 252 + 4 * 12 = 300.
+		let long = CallOpusPacket.frames(in: Data([0x5a, 252, 12] + body + [9]))
+		#expect(long == [Data([0x58] + body), Data([0x58, 9])])
+
+		#expect(CallOpusPacket.frames(in: Data([0x5a, 200, 1, 2])) == nil)
+		#expect(CallOpusPacket.frames(in: Data([0x5a])) == nil)
+		#expect(CallOpusPacket.frames(in: Data([0x5a, 252])) == nil)
+	}
+
+	@Test("code 3 reads constant and variable frames, with padding")
+	func codeThree() {
+		// Constant: two frames of two bytes.
+		#expect(CallOpusPacket.frames(in: Data([0x5b, 0x02, 1, 2, 3, 4])) == [Data([0x58, 1, 2]), Data([0x58, 3, 4])])
+		// Variable: three frames, the last taking what remains.
+		#expect(CallOpusPacket.frames(in: Data([0x5b, 0x83, 1, 2, 9, 8, 7, 6])) == [Data([0x58, 9]), Data([0x58, 8, 7]), Data([0x58, 6])])
+		// Padding of two bytes behind one frame.
+		#expect(CallOpusPacket.frames(in: Data([0x5b, 0x41, 2, 5, 6, 0, 0])) == [Data([0x58, 5, 6])])
+		// Malformed: no frames, a body that does not divide, padding longer than the packet.
+		#expect(CallOpusPacket.frames(in: Data([0x5b, 0x00])) == nil)
+		#expect(CallOpusPacket.frames(in: Data([0x5b, 0x02, 1, 2, 3])) == nil)
+		#expect(CallOpusPacket.frames(in: Data([0x5b, 0x41, 200, 5])) == nil)
+	}
+
+	@Test("a frame with no bytes has nothing to decode")
+	func emptyFrame() {
+		#expect(CallOpusPacket.frames(in: Data([0x5a, 0, 3])) == [Data([0x58, 3])])
+		#expect(CallOpusPacket.frames(in: Data([0x59])) == [])
+	}
+
+	@Test("the decoder plays all 120 ms of the two-frame packet a phone sends in a video call")
+	func decodesTwoFrames() throws {
+		let encoder = try CallOpusEncoder()
+		let decoder = try CallOpusDecoder()
+		var frames = [Data]()
+		for index in 0..<5 {
+			frames.append(try encoder.encode(tone(index * 960)))
+		}
+		for frame in frames.prefix(3) {
+			_ = try decoder.decode(frame)
+		}
+
+		let body = frames[3].dropFirst()
+		var variable = Data([(frames[3][0] & 0xfc) | 0x02, UInt8(body.count)])
+		variable.append(body)
+		variable.append(frames[4].dropFirst())
+		#expect(variable[0] == 0x5a)
+
+		let samples = try decoder.decode(variable)
+		#expect(samples.count == 1920)
+		#expect((samples.map { abs(Int($0)) }.max() ?? 0) > 3_000)
 	}
 }
 
