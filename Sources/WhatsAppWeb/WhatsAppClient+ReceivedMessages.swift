@@ -296,17 +296,23 @@ extension WhatsAppClient {
 		pollUpdateMessageKey: WhatsAppMessageKey
 	) async -> [Data]? {
 		guard let resolver = pollVoteContextResolver,
-			  let context = try? await resolver.context(for: key, pollUpdateMessageKey: pollUpdateMessageKey) else {
+			  let contexts = try? await resolver.contexts(for: key, pollUpdateMessageKey: pollUpdateMessageKey) else {
 			return nil
 		}
 
-		return try? PollVoteCipher().decrypt(
-			update,
-			pollMessageID: context.pollMessageID,
-			pollCreatorJID: context.pollCreatorJID,
-			voterJID: context.voterJID,
-			pollEncKey: context.pollEncKey
-		)
+		let cipher = PollVoteCipher()
+		for context in contexts {
+			if let hashes = try? cipher.decrypt(
+				update,
+				pollMessageID: context.pollMessageID,
+				pollCreatorJID: context.pollCreatorJID,
+				voterJID: context.voterJID,
+				pollEncKey: context.pollEncKey
+			) {
+				return hashes
+			}
+		}
+		return nil
 	}
 
 	private func emitMessageActionUpdateIfNeeded(
