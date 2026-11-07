@@ -3,6 +3,7 @@
 enum MessageStanzaClassifier {
 	static func stanzaType(for message: Proto_Message) -> String {
 		if isReaction(message) { return "reaction" }
+		if isPoll(message) { return "poll" }
 		return mediaType(for: message) == nil ? "text" : "media"
 	}
 
@@ -10,13 +11,18 @@ enum MessageStanzaClassifier {
 	static func encAttributes(for message: Proto_Message) -> [String: String] {
 		// These only change an existing message, so one the recipient cannot decrypt is
 		// dropped without asking for a retry.
-		if isReaction(message) || changesExistingMessage(message) { return ["decrypt-fail": "hide"] }
+		if isReaction(message) || changesExistingMessage(message) || message.hasPollUpdateMessage { return ["decrypt-fail": "hide"] }
 		return mediaType(for: message).map { ["mediatype": $0] } ?? [:]
 	}
 
 	private static func changesExistingMessage(_ message: Proto_Message) -> Bool {
 		guard message.hasProtocolMessage else { return false }
 		return message.protocolMessage.type == .revoke || message.protocolMessage.type == .messageEdit
+	}
+
+	private static func isPoll(_ message: Proto_Message) -> Bool {
+		message.hasPollCreationMessage || message.hasPollCreationMessageV2 || message.hasPollCreationMessageV3
+			|| message.hasPollUpdateMessage
 	}
 
 	private static func isReaction(_ message: Proto_Message) -> Bool {

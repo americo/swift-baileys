@@ -52,6 +52,12 @@ public struct ReceivedMessage: Equatable, Sendable {
 	public let isViewOnce: Bool
 	/// What this message replies to.
 	public let quote: ReceivedQuote?
+	/// Marked as forwarded by its sender.
+	public let isForwarded: Bool
+	/// How many times it was forwarded, when the sender says so.
+	public let forwardingScore: UInt32?
+	/// The disappearing messages timer it was sent under, in seconds.
+	public let ephemeralExpiration: UInt32?
 
 	public init(
 		id: String,
@@ -69,7 +75,10 @@ public struct ReceivedMessage: Equatable, Sendable {
 		starred: Bool = false,
 		textStyle: ReceivedTextStyle? = nil,
 		isViewOnce: Bool = false,
-		quote: ReceivedQuote? = nil
+		quote: ReceivedQuote? = nil,
+		isForwarded: Bool = false,
+		forwardingScore: UInt32? = nil,
+		ephemeralExpiration: UInt32? = nil
 	) {
 		self.id = id
 		self.from = from
@@ -87,6 +96,9 @@ public struct ReceivedMessage: Equatable, Sendable {
 		self.textStyle = textStyle
 		self.isViewOnce = isViewOnce
 		self.quote = quote
+		self.isForwarded = isForwarded
+		self.forwardingScore = forwardingScore
+		self.ephemeralExpiration = ephemeralExpiration
 	}
 }
 

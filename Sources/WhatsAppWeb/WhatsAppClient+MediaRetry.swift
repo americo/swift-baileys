@@ -163,7 +163,10 @@ private extension ReceivedMessage {
 			status: status,
 			pushName: pushName,
 			stub: stub,
-			isViewOnce: isViewOnce
+			isViewOnce: isViewOnce,
+			isForwarded: isForwarded,
+			forwardingScore: forwardingScore,
+			ephemeralExpiration: ephemeralExpiration
 		)
 	}
 }

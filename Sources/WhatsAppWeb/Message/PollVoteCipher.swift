@@ -8,6 +8,11 @@ public struct PollVoteCipher: Sendable {
 		self.ivGenerator = ivGenerator
 	}
 
+	/// How a vote names an option.
+	public static func optionHash(_ option: String) -> Data {
+		Data(SHA256.hash(data: Data(option.utf8)))
+	}
+
 	func encrypt(
 		selectedOptionHashes: [Data],
 		pollMessageID: String,

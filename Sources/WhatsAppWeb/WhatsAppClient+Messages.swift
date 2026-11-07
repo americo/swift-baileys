@@ -180,8 +180,19 @@ extension WhatsAppClient {
 		to destinationJID: String,
 		location: OutgoingLocationContent,
 		viewOnce: Bool = false,
+		context: OutgoingMessageContext = .none,
 		messageID: String? = nil
 	) async throws -> String {
+		if destinationJID.isGroupJID || context != .none {
+			return try await sendResolvedMessage(
+				to: destinationJID,
+				message: wrapViewOnce(
+					MessageContentBuilder.applying(context, to: MessageContentBuilder.location(location)),
+					enabled: viewOnce
+				),
+				messageID: messageID
+			)
+		}
 		guard let messageDeviceResolver else {
 			throw WhatsAppClientError.missingMessageDeviceResolver
 		}
@@ -250,8 +261,19 @@ extension WhatsAppClient {
 		to destinationJID: String,
 		contact: OutgoingContactContent,
 		viewOnce: Bool = false,
+		context: OutgoingMessageContext = .none,
 		messageID: String? = nil
 	) async throws -> String {
+		if destinationJID.isGroupJID || context != .none {
+			return try await sendResolvedMessage(
+				to: destinationJID,
+				message: wrapViewOnce(
+					MessageContentBuilder.applying(context, to: MessageContentBuilder.contact(contact)),
+					enabled: viewOnce
+				),
+				messageID: messageID
+			)
+		}
 		guard let messageDeviceResolver else {
 			throw WhatsAppClientError.missingMessageDeviceResolver
 		}
@@ -275,8 +297,22 @@ extension WhatsAppClient {
 		displayName: String,
 		contacts: [OutgoingContactContent],
 		viewOnce: Bool = false,
+		context: OutgoingMessageContext = .none,
 		messageID: String? = nil
 	) async throws -> String {
+		if destinationJID.isGroupJID || context != .none {
+			return try await sendResolvedMessage(
+				to: destinationJID,
+				message: wrapViewOnce(
+					MessageContentBuilder.applying(
+						context,
+						to: MessageContentBuilder.contacts(displayName: displayName, contacts: contacts)
+					),
+					enabled: viewOnce
+				),
+				messageID: messageID
+			)
+		}
 		guard let messageDeviceResolver else {
 			throw WhatsAppClientError.missingMessageDeviceResolver
 		}
@@ -302,14 +338,16 @@ extension WhatsAppClient {
 		to destinationJID: String,
 		poll: OutgoingPollContent,
 		viewOnce: Bool = false,
+		context: OutgoingMessageContext = .none,
 		messageID: String? = nil
 	) async throws -> String {
-		let message = try MessageContentBuilder.poll(poll)
+		let message = MessageContentBuilder.applying(context, to: try MessageContentBuilder.poll(poll))
 
 		return try await sendResolvedMessage(
 			to: destinationJID,
 			message: wrapViewOnce(message, enabled: viewOnce),
-			messageID: messageID
+			messageID: messageID,
+			additionalNodes: [BinaryNode(tag: "meta", attrs: ["polltype": "creation"])]
 		)
 	}
 

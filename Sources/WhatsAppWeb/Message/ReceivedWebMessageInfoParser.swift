@@ -36,8 +36,44 @@ enum ReceivedWebMessageInfoParser {
 			starred: info.starred,
 			textStyle: info.hasMessage ? textStyle(of: info.message) : nil,
 			isViewOnce: info.hasMessage && MessageContentNormalizer.isViewOnce(info.message),
-			quote: info.hasMessage ? quote(of: info.message) : nil
+			quote: info.hasMessage ? quote(of: info.message) : nil,
+			isForwarded: info.hasMessage && isForwarded(info.message),
+			forwardingScore: info.hasMessage ? forwardingScore(of: info.message) : nil,
+			ephemeralExpiration: info.hasMessage ? ephemeralExpiration(of: info.message) : nil
 		)
+	}
+
+	/// The context info of whichever content the message carries.
+	private static func contextInfo(of message: Proto_Message) -> Proto_ContextInfo? {
+		let m = MessageContentNormalizer.normalized(message)
+		if m.hasExtendedTextMessage, m.extendedTextMessage.hasContextInfo { return m.extendedTextMessage.contextInfo }
+		if m.hasImageMessage, m.imageMessage.hasContextInfo { return m.imageMessage.contextInfo }
+		if m.hasVideoMessage, m.videoMessage.hasContextInfo { return m.videoMessage.contextInfo }
+		if m.hasAudioMessage, m.audioMessage.hasContextInfo { return m.audioMessage.contextInfo }
+		if m.hasDocumentMessage, m.documentMessage.hasContextInfo { return m.documentMessage.contextInfo }
+		if m.hasStickerMessage, m.stickerMessage.hasContextInfo { return m.stickerMessage.contextInfo }
+		if m.hasContactMessage, m.contactMessage.hasContextInfo { return m.contactMessage.contextInfo }
+		if m.hasContactsArrayMessage, m.contactsArrayMessage.hasContextInfo { return m.contactsArrayMessage.contextInfo }
+		if m.hasLocationMessage, m.locationMessage.hasContextInfo { return m.locationMessage.contextInfo }
+		if m.hasPollCreationMessage, m.pollCreationMessage.hasContextInfo { return m.pollCreationMessage.contextInfo }
+		if m.hasPollCreationMessageV2, m.pollCreationMessageV2.hasContextInfo { return m.pollCreationMessageV2.contextInfo }
+		if m.hasPollCreationMessageV3, m.pollCreationMessageV3.hasContextInfo { return m.pollCreationMessageV3.contextInfo }
+		return nil
+	}
+
+	static func isForwarded(_ message: Proto_Message) -> Bool {
+		guard let context = contextInfo(of: message) else { return false }
+		return context.isForwarded || context.forwardingScore > 0
+	}
+
+	static func forwardingScore(of message: Proto_Message) -> UInt32? {
+		guard let context = contextInfo(of: message), context.hasForwardingScore else { return nil }
+		return context.forwardingScore
+	}
+
+	static func ephemeralExpiration(of message: Proto_Message) -> UInt32? {
+		guard let context = contextInfo(of: message), context.hasExpiration, context.expiration > 0 else { return nil }
+		return context.expiration
 	}
 
 	private static func reaction(_ reaction: Proto_Reaction) -> ReceivedReactionContent {
