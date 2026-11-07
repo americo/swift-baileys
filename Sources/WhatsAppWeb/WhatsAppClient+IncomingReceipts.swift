@@ -42,11 +42,14 @@ extension WhatsAppClient {
 			}
 
 			do {
-				_ = try await resendCachedMessages(for: request)
+				let resent = try await resendCachedMessages(for: request)
+				WhatsAppLog.logger.notice("message retry from=\(requesterJID, privacy: .public) id=\(firstID, privacy: .public) resent=\(resent.count)")
 			} catch {
+				let reason = retryResendFailureReason(from: error)
+				WhatsAppLog.logger.error("message retry from=\(requesterJID, privacy: .public) id=\(firstID, privacy: .public) failed: \(String(describing: reason), privacy: .public)")
 				eventContinuation.yield(.messageRetryResendFailed(MessageRetryResendFailure(
 					request: request,
-					reason: retryResendFailureReason(from: error)
+					reason: reason
 				)))
 			}
 			return true
