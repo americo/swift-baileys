@@ -44,4 +44,21 @@ public protocol PollVoteContextResolving: Sendable {
 		for key: WhatsAppMessageKey,
 		pollUpdateMessageKey: WhatsAppMessageKey
 	) async throws -> PollVoteDecryptionContext?
+
+	/// Every way the creator and voter could have been named when the vote was encrypted.
+	/// A chat may be addressed by phone number or by LID, and the voter's phone picks one the
+	/// receiver cannot see, so the vote is tried against each until one authenticates.
+	func contexts(
+		for key: WhatsAppMessageKey,
+		pollUpdateMessageKey: WhatsAppMessageKey
+	) async throws -> [PollVoteDecryptionContext]
+}
+
+extension PollVoteContextResolving {
+	public func contexts(
+		for key: WhatsAppMessageKey,
+		pollUpdateMessageKey: WhatsAppMessageKey
+	) async throws -> [PollVoteDecryptionContext] {
+		try await context(for: key, pollUpdateMessageKey: pollUpdateMessageKey).map { [$0] } ?? []
+	}
 }
