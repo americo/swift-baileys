@@ -86,6 +86,8 @@ public actor WhatsAppClient {
 	public nonisolated let events: AsyncStream<WhatsAppClientEvent>
 	public private(set) var state: WhatsAppClientState = .disconnected
 	public private(set) var authenticationState: AuthenticationState?
+	/// How the last connection ended. Set before `.disconnected` is emitted, cleared on `connect()`.
+	public private(set) var lastDisconnect: WhatsAppDisconnect?
 	private nonisolated let localSignalIdentity: CurrentLocalSignalIdentity
 
 	let eventContinuation: AsyncStream<WhatsAppClientEvent>.Continuation
@@ -274,6 +276,7 @@ public actor WhatsAppClient {
 
 	public func connect() async throws {
 		state = .connecting
+		lastDisconnect = nil
 		let nextTransport = transportFactory(configuration.webSocketURL)
 		do {
 			try await nextTransport.connect()
@@ -291,7 +294,7 @@ public actor WhatsAppClient {
 		if let configured = configuration.version {
 			version = configured
 		} else {
-			version = await WhatsAppVersionResolver.fetchLatestWaWebVersion().version
+			version = await WhatsAppVersionCache.shared.version()
 		}
 		let inboundCodec: NoiseFrameCodec
 		do {
@@ -519,10 +522,10 @@ public actor WhatsAppClient {
 			))
 		}
 
-		await disconnect(reason: reason)
+		await disconnect(reason: reason, statusCode: DisconnectReasonCode.loggedOut)
 	}
 
-	public func disconnect(reason: String) async {
+	public func disconnect(reason: String, statusCode: Int = DisconnectReasonCode.connectionClosed) async {
 		receiveTask?.cancel()
 		receiveTask = nil
 		recentHistoryPausedTask?.cancel()
@@ -535,7 +538,17 @@ public actor WhatsAppClient {
 		await transport?.close()
 		transport = nil
 		state = .disconnected
+		await record(WhatsAppDisconnect(reason: reason, statusCode: statusCode))
 		eventContinuation.yield(.disconnected(reason: reason))
+	}
+
+	private func record(_ disconnect: WhatsAppDisconnect) async {
+		lastDisconnect = disconnect
+		WhatsAppLog.logger.notice("disconnected code=\(disconnect.statusCode) reason=\(disconnect.reason, privacy: .public)")
+		// The version sent at login was refused: look it up again on the next connection.
+		if disconnect.statusCode == DisconnectReasonCode.clientOutdated, configuration.version == nil {
+			await WhatsAppVersionCache.shared.invalidate()
+		}
 	}
 
 	/// Runs on a transport without the handshake, which needs real credentials. For tests.
@@ -565,7 +578,7 @@ public actor WhatsAppClient {
 			while !Task.isCancelled {
 				do {
 					guard let data = try await transport.receive() else {
-						await finishReceiveLoop(reason: "Connection Closed")
+						await finishReceiveLoop(reason: "Connection Closed", statusCode: DisconnectReasonCode.connectionClosed)
 						return
 					}
 
@@ -579,14 +592,14 @@ public actor WhatsAppClient {
 						}
 					}
 				} catch {
-					await finishReceiveLoop(reason: "Receive Loop Error (\(error))")
+					await finishReceiveLoop(reason: "Receive Loop Error (\(error))", statusCode: DisconnectReasonCode.connectionLost)
 					return
 				}
 			}
 		}
 	}
 
-	private func finishReceiveLoop(reason: String) async {
+	private func finishReceiveLoop(reason: String, statusCode: Int) async {
 		guard state != .disconnected else {
 			return
 		}
@@ -602,6 +615,7 @@ public actor WhatsAppClient {
 		await transport?.close()
 		transport = nil
 		state = .disconnected
+		await record(WhatsAppDisconnect(reason: reason, statusCode: statusCode))
 		eventContinuation.yield(.disconnected(reason: reason))
 	}
 
@@ -663,13 +677,17 @@ public actor WhatsAppClient {
 	private func handleConnectionTerminationNode(_ node: BinaryNode) async -> Bool {
 		switch node.tag {
 		case "stream:error":
-			await disconnect(reason: "Stream Errored (\(ConnectionErrorMapper.streamErrorInfo(from: node).reason))")
+			let info = ConnectionErrorMapper.streamErrorInfo(from: node)
+			await disconnect(reason: "Stream Errored (\(info.reason))", statusCode: info.statusCode)
 			return true
 		case "failure":
-			await disconnect(reason: "Connection Failure (\(node.attrs["reason"] ?? "500"))")
+			await disconnect(
+				reason: "Connection Failure (\(node.attrs["reason"] ?? "500"))",
+				statusCode: ConnectionErrorMapper.statusCode(fromFailure: node)
+			)
 			return true
 		case "xmlstreamend":
-			await disconnect(reason: "Connection Terminated by Server")
+			await disconnect(reason: "Connection Terminated by Server", statusCode: DisconnectReasonCode.connectionClosed)
 			return true
 		default:
 			return false

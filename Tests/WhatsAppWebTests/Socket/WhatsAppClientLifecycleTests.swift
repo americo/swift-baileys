@@ -428,6 +428,7 @@ struct WhatsAppClientLifecycleTests {
 
 		#expect(await events.next() == .disconnected(reason: "Connection Closed"))
 		#expect(await client.state == .disconnected)
+		#expect(await client.lastDisconnect?.kind == .transient)
 		#expect(await transport.closeCount == 1)
 	}
 
@@ -460,6 +461,7 @@ struct WhatsAppClientLifecycleTests {
 		#expect(await transport.closeCount == 1)
 		#expect(await client.state == .disconnected)
 		#expect(await events.next() == .disconnected(reason: "Stream Errored (conflict)"))
+		#expect(await client.lastDisconnect == WhatsAppDisconnect(reason: "Stream Errored (conflict)", statusCode: 440))
 	}
 
 	@Test("failure node closes the client")
@@ -474,6 +476,7 @@ struct WhatsAppClientLifecycleTests {
 		#expect(await transport.closeCount == 1)
 		#expect(await client.state == .disconnected)
 		#expect(await events.next() == .disconnected(reason: "Connection Failure (401)"))
+		#expect(await client.lastDisconnect?.kind == .loggedOut)
 	}
 
 	@Test("xml stream end closes the client")
