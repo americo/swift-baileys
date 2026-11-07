@@ -36,7 +36,10 @@ extension WhatsAppClient {
 				messageSecret: ReceivedWebMessageInfoParser.secret(of: protoMessage),
 				textStyle: ReceivedWebMessageInfoParser.textStyle(of: protoMessage),
 				isViewOnce: MessageContentNormalizer.isViewOnce(protoMessage),
-				quote: ReceivedWebMessageInfoParser.quote(of: protoMessage)
+				quote: ReceivedWebMessageInfoParser.quote(of: protoMessage),
+				isForwarded: ReceivedWebMessageInfoParser.isForwarded(protoMessage),
+				forwardingScore: ReceivedWebMessageInfoParser.forwardingScore(of: protoMessage),
+				ephemeralExpiration: ReceivedWebMessageInfoParser.ephemeralExpiration(of: protoMessage)
 			)
 			let receivedMessage = cleanedReceivedMessage(parsedMessage)
 			let content = receivedMessage.content

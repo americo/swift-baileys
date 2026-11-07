@@ -87,6 +87,8 @@ public struct HistorySyncChat: Equatable, Sendable {
 	public let muteEndTime: Int64?
 	public let unreadCount: Int?
 	public let isMarkedAsUnread: Bool?
+	/// The chat's disappearing messages timer in seconds; 0 means off.
+	public let ephemeralExpiration: UInt32?
 
 	public init(
 		id: String,
@@ -101,8 +103,10 @@ public struct HistorySyncChat: Equatable, Sendable {
 		isArchived: Bool? = nil,
 		muteEndTime: Int64? = nil,
 		unreadCount: Int? = nil,
-		isMarkedAsUnread: Bool? = nil
+		isMarkedAsUnread: Bool? = nil,
+		ephemeralExpiration: UInt32? = nil
 	) {
+		self.ephemeralExpiration = ephemeralExpiration
 		self.id = id
 		self.name = name
 		self.displayName = displayName
@@ -261,7 +265,8 @@ enum HistorySyncProcessor {
 					isArchived: chat.hasArchived ? chat.archived : nil,
 					muteEndTime: chat.hasMuteEndTime ? Int64(truncatingIfNeeded: chat.muteEndTime) : nil,
 					unreadCount: chat.hasUnreadCount ? Int(chat.unreadCount) : nil,
-					isMarkedAsUnread: chat.hasMarkedAsUnread ? chat.markedAsUnread : nil
+					isMarkedAsUnread: chat.hasMarkedAsUnread ? chat.markedAsUnread : nil,
+					ephemeralExpiration: chat.hasEphemeralExpiration ? chat.ephemeralExpiration : nil
 				))
 			}
 		case .pushName:

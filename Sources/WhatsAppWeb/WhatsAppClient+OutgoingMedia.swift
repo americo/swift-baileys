@@ -27,6 +27,7 @@ extension WhatsAppClient {
 		media: OutgoingMediaContent,
 		mentions: [String] = [],
 		quoted: OutgoingQuotedTextContent? = nil,
+		context: OutgoingMessageContext = .none,
 		messageID: String? = nil
 	) async throws -> String {
 		let uploaded = try await uploadMedia(data, mediaType: media.uploadType)
@@ -36,7 +37,11 @@ extension WhatsAppClient {
 			quoted: quoted,
 			quotedRemoteJID: quoted?.chatJID == destinationJID ? nil : quoted?.chatJID
 		)
-		return try await sendResolvedMessage(to: destinationJID, message: message, messageID: messageID)
+		return try await sendResolvedMessage(
+			to: destinationJID,
+			message: MessageContentBuilder.applying(context, to: message),
+			messageID: messageID
+		)
 	}
 
 	private static func uploadedMessage(

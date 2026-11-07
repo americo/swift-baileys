@@ -28,7 +28,10 @@ public enum MessageCleaner {
 			starred: message.starred,
 			textStyle: message.textStyle,
 			isViewOnce: message.isViewOnce,
-			quote: message.quote
+			quote: message.quote,
+			isForwarded: message.isForwarded,
+			forwardingScore: message.forwardingScore,
+			ephemeralExpiration: message.ephemeralExpiration
 		)
 	}
 
