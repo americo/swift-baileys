@@ -67,6 +67,48 @@ struct WhatsAppClientMessageRetryResendTests {
 		#expect(stanza.firstChild(named: "enc")?.content == .data(Data([0xab, 0xcd])))
 	}
 
+	@Test("a resent poll still says it is a poll", arguments: ["creation", "vote"])
+	func resentPollKeepsItsMeta(pollType: String) async throws {
+		let client = WhatsAppClient(transportFactory: { _ in MockMessageSendWebSocketTransport() })
+		var message = Proto_Message()
+		message.pollUpdateMessage = Proto_Message.PollUpdateMessage()
+		await client.cacheRecentSentMessage(
+			destinationJID: "123@s.whatsapp.net",
+			id: "3EB0POLL",
+			message: message,
+			additionalNodes: [BinaryNode(tag: "meta", attrs: ["polltype": pollType])]
+		)
+
+		let source = try #require(await client.retrySource(requestedDestinationJID: "123@s.whatsapp.net", id: "3EB0POLL"))
+		#expect(source.message.peerStanza == nil)
+
+		let stanza = try await MessageRelayBuilder(encoder: MessageEncoder(randomByte: { 0x00 }), encryptor: PeerRecordingEncryptor())
+			.buildRetryMessageStanza(
+				to: source.destinationJID,
+				messageID: "3EB0POLL",
+				message: source.message.message,
+				participantJID: "123:2@s.whatsapp.net",
+				retryCount: 1,
+				localUserJID: "999:21@s.whatsapp.net",
+				localUserLID: "888:21@lid",
+				additionalNodes: source.message.metaNodes
+			)
+		#expect(stanza.attrs["type"] == "poll")
+		#expect(stanza.firstChild(named: "meta")?.attrs["polltype"] == pollType)
+		#expect(stanza.firstChild(named: "enc")?.attrs["decrypt-fail"] == "hide")
+	}
+
+	@Test("a resent text message carries no extra nodes")
+	func resentTextHasNoMeta() async throws {
+		let client = WhatsAppClient(transportFactory: { _ in MockMessageSendWebSocketTransport() })
+		var message = Proto_Message()
+		message.conversation = "hi"
+		await client.cacheRecentSentMessage(destinationJID: "123@s.whatsapp.net", id: "3EB0TEXT", message: message)
+
+		let source = try #require(await client.retrySource(requestedDestinationJID: "123@s.whatsapp.net", id: "3EB0TEXT"))
+		#expect(source.message.metaNodes.isEmpty)
+	}
+
 	@Test("resends a peer request to our phone as a peer request when its retry names no recipient")
 	func resendsPeerRequestToOwnPhone() async throws {
 		let (client, transport, encryptor) = try await peerRetryClient()

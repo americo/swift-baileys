@@ -67,7 +67,12 @@ extension WhatsAppClient {
 			additionalNodes: additionalNodes
 		)
 		try await sendNode(stanza)
-		cacheRecentSentMessage(destinationJID: destinationJID, id: resolvedMessageID, message: message)
+		cacheRecentSentMessage(
+			destinationJID: destinationJID,
+			id: resolvedMessageID,
+			message: message,
+			additionalNodes: additionalNodes
+		)
 		return resolvedMessageID
 	}
 }
