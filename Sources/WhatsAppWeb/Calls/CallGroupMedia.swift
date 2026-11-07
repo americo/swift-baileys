@@ -48,9 +48,11 @@ struct CallGroupMediaRegistry {
 		var pid: UInt32?
 		let audioSSRC: UInt32
 		let videoSSRC: UInt32
+		let appDataSSRC: UInt32
 		var isVideoEnabled: Bool
 		var audio: CallAudioPipeline?
 		var video: CallVideoPipeline?
+		var appData: CallAudioPipeline?
 		var rtcpKeys: CallSRTPKeys?
 	}
 
@@ -68,6 +70,7 @@ struct CallGroupMediaRegistry {
 	private(set) var receivers = [String: Receiver]()
 	private var audioRoutes = [UInt32: String]()
 	private var videoRoutes = [UInt32: String]()
+	private var appDataRoutes = [UInt32: String]()
 	/// Every stream slot of each participant, for its RTCP and its auxiliary streams.
 	private var slotRoutes = [UInt32: String]()
 
@@ -102,6 +105,10 @@ struct CallGroupMediaRegistry {
 		videoRoutes[ssrc]
 	}
 
+	func participantID(forAppData ssrc: UInt32) -> String? {
+		appDataRoutes[ssrc]
+	}
+
 	func participantID(forSlot ssrc: UInt32) -> String? {
 		slotRoutes[ssrc]
 	}
@@ -134,6 +141,10 @@ struct CallGroupMediaRegistry {
 
 	mutating func unprotectAuxiliary(_ packet: Data, from participantID: String) throws -> Data? {
 		try receivers[participantID]?.video?.unprotectAuxiliary(packet)
+	}
+
+	mutating func unprotectAppData(_ packet: Data, from participantID: String) throws -> CallAudioPipeline.Received? {
+		try receivers[participantID]?.appData?.unprotect(packet)
 	}
 
 	func rtcpKeys(for participantID: String) -> CallSRTPKeys? {
@@ -179,6 +190,7 @@ struct CallGroupMediaRegistry {
 				} else if isVideo, existing.video == nil, let epochKey {
 					receiver = try makeReceiver(key: epochKey, userJID: participant.jid, deviceJID: device.jid, pid: device.pid, video: true)
 					receiver.audio = existing.audio
+					receiver.appData = existing.appData
 				} else {
 					receiver = existing
 				}
@@ -272,6 +284,7 @@ struct CallGroupMediaRegistry {
 			try audio.rekeyReceive(callKey: epoch.key, peerParticipantID: receiver.participantID)
 			updated.audio = audio
 			try updated.video?.rekeyReceive(callKey: epoch.key, peerParticipantID: receiver.participantID)
+			try updated.appData?.rekeyReceive(callKey: epoch.key, peerParticipantID: receiver.participantID)
 			updated.rtcpKeys = try CallMediaCrypto.deriveRTCPKeys(callKey: epoch.key, participantID: receiver.participantID)
 			next[id] = updated
 		}
@@ -285,6 +298,7 @@ struct CallGroupMediaRegistry {
 		let id = CallMediaCrypto.formatParticipantID(deviceJID)
 		let audioSSRC = CallRelayAllocate.audioSSRC(callID: callID, participantID: id)
 		let videoSSRC = CallRelayAllocate.videoSSRC(callID: callID, participantID: id)
+		let appDataSSRC = CallRelayAllocate.ssrc(callID: callID, participantID: id, slot: CallRelayAllocate.appDataSlot)
 		return try Receiver(
 			participantID: id,
 			userJID: userJID,
@@ -292,6 +306,7 @@ struct CallGroupMediaRegistry {
 			pid: pid,
 			audioSSRC: audioSSRC,
 			videoSSRC: videoSSRC,
+			appDataSSRC: appDataSSRC,
 			isVideoEnabled: video,
 			audio: CallAudioPipeline(
 				callKey: key,
@@ -307,6 +322,15 @@ struct CallGroupMediaRegistry {
 				ssrc: videoSSRC,
 				tagLength: tagLength
 			) : nil,
+			appData: CallAudioPipeline(
+				callKey: key,
+				selfParticipantID: localParticipantID,
+				peerParticipantID: id,
+				ssrc: appDataSSRC,
+				tagLength: tagLength,
+				payloadType: CallAppData.payloadType,
+				samplesPerPacket: CallAppData.timestampStride
+			),
 			rtcpKeys: CallMediaCrypto.deriveRTCPKeys(callKey: key, participantID: id)
 		)
 	}
@@ -320,9 +344,11 @@ struct CallGroupMediaRegistry {
 			pid: pid,
 			audioSSRC: CallRelayAllocate.audioSSRC(callID: callID, participantID: id),
 			videoSSRC: CallRelayAllocate.videoSSRC(callID: callID, participantID: id),
+			appDataSSRC: CallRelayAllocate.ssrc(callID: callID, participantID: id, slot: CallRelayAllocate.appDataSlot),
 			isVideoEnabled: false,
 			audio: nil,
 			video: nil,
+			appData: nil,
 			rtcpKeys: nil
 		)
 	}
@@ -330,6 +356,7 @@ struct CallGroupMediaRegistry {
 	private mutating func rebuildRoutes() throws {
 		var audio = [UInt32: String]()
 		var video = [UInt32: String]()
+		var appData = [UInt32: String]()
 		var slots = [UInt32: String]()
 		for receiver in receivers.values where receiver.audio != nil {
 			guard audio.updateValue(receiver.participantID, forKey: receiver.audioSSRC) == nil else {
@@ -338,6 +365,9 @@ struct CallGroupMediaRegistry {
 			if receiver.isVideoEnabled, receiver.video != nil,
 			   video.updateValue(receiver.participantID, forKey: receiver.videoSSRC) != nil {
 				throw CallGroupMediaError.invalidSnapshot
+			}
+			if receiver.appData != nil {
+				appData[receiver.appDataSSRC] = receiver.participantID
 			}
 			for slot in UInt32(0)..<UInt32(CallRelayAllocate.streamSlots.count) {
 				let ssrc = CallRelayAllocate.ssrc(callID: callID, participantID: receiver.participantID, slot: slot)
@@ -349,6 +379,7 @@ struct CallGroupMediaRegistry {
 
 		audioRoutes = audio
 		videoRoutes = video
+		appDataRoutes = appData
 		slotRoutes = slots
 	}
 

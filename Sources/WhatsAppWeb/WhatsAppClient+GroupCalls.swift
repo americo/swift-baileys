@@ -23,7 +23,33 @@ struct GroupCallRecord: Sendable {
 	/// What each device stated of itself in its offer, preaccept or accept, for a 1:1 call that may yet
 	/// become a group call and has to name them.
 	var deviceCapabilities = [String: Data]()
+	/// Who is waiting to get into a link's call.
+	var waitingRoom: CallWaitingRoom?
 	let createdAt = Date()
+
+	enum WaitingRoomApply: Equatable {
+		case applied
+		case stale
+		case refused
+	}
+
+	/// Keeps the newest snapshot, for this call and this link.
+	mutating func applyWaitingRoom(_ room: CallWaitingRoom) -> WaitingRoomApply {
+		guard room.callID == state.callID, room.callCreator == state.callCreator else {
+			return .refused
+		}
+		if let current = waitingRoom {
+			guard current.link == room.link else {
+				return .refused
+			}
+			if let held = current.transactionID, let next = room.transactionID, next <= held {
+				return .stale
+			}
+		}
+
+		waitingRoom = room
+		return .applied
+	}
 
 	mutating func retain(_ epoch: GroupCallEpoch) {
 		guard !epochs.contains(where: { $0.transactionID == epoch.transactionID }) else {
@@ -59,9 +85,58 @@ extension WhatsAppClient {
 			throw WhatsAppVoiceCallError.missingOwnLID
 		}
 
-		let ownDevice = Self.deviceQualifiedLID(lid, deviceFrom: me.id)
 		let metadata = try await groupMetadata(groupJID)
 		let targets = try await groupCallTargets(metadata, ownLID: lid, ownPhone: me.id)
+		return try await placeGroupCall(
+			groupJID: groupJID,
+			targets: targets,
+			ownDevice: Self.deviceQualifiedLID(lid, deviceFrom: me.id),
+			video: video
+		)
+	}
+
+	/// Rings several people at once, in a call that belongs to no group. Everyone must be reachable, and
+	/// there must be at least two of them: a call to one person is a 1:1 call.
+	public func startGroupCall(people: [String], video: Bool = false) async throws -> WhatsAppOutgoingGroupCall {
+		guard let me = authenticationState?.credentials.me else {
+			throw WhatsAppClientError.missingAuthenticatedUser
+		}
+		guard let lid = me.lid else {
+			throw WhatsAppVoiceCallError.missingOwnLID
+		}
+
+		var resolved = [String]()
+		for person in people {
+			try await resolved.append(resolvePeerLID(CallJID.user(person)))
+		}
+		return try await placeGroupCall(
+			groupJID: nil,
+			targets: Self.peopleToRing(resolved, ownLID: lid),
+			ownDevice: Self.deviceQualifiedLID(lid, deviceFrom: me.id),
+			video: video
+		)
+	}
+
+	/// Who a call with no group rings: each person once, and never this account.
+	static func peopleToRing(_ resolved: [String], ownLID: String) throws -> [String] {
+		var targets = [String]()
+		for person in resolved.map(CallJID.user) where !CallJID.isSameUser(person, ownLID) && !targets.contains(person) {
+			targets.append(person)
+		}
+		guard targets.count >= GroupCallLimits.minPeopleWithoutGroup else {
+			throw WhatsAppVoiceCallError.noDevices
+		}
+		return targets
+	}
+
+	/// Sends the offer. In a group, a member with no devices is left out, as the rest can still be rung.
+	/// Without one, the people were chosen, so a call that would miss one of them does not start.
+	private func placeGroupCall(
+		groupJID: String?,
+		targets: [String],
+		ownDevice: String,
+		video: Bool
+	) async throws -> WhatsAppOutgoingGroupCall {
 		guard !targets.isEmpty else {
 			throw WhatsAppVoiceCallError.noDevices
 		}
@@ -84,6 +159,8 @@ extension WhatsAppClient {
 			let own = devices.filter { CallJID.isSameUser($0, target) }
 			if !own.isEmpty {
 				participants.append(GroupCallParticipant(jid: target, devices: own.map { GroupCallDevice(jid: $0) }))
+			} else if groupJID == nil {
+				throw WhatsAppVoiceCallError.noDevices
 			}
 		}
 		guard participants.count > 1 else {
@@ -126,12 +203,7 @@ extension WhatsAppClient {
 				throw WhatsAppVoiceCallError.missingRelay
 			}
 
-			if let keyed = epochRoster(ack: snapshot, current: update, retained: groupCalls[callID]?.epochs.last?.transactionID),
-			   groupCalls[callID]?.keyInFlight != keyed.transactionID {
-				groupCalls[callID]?.keyInFlight = keyed.transactionID
-				let key = try await fanOutGroupEpoch(keyed)
-				retainGroupEpoch(GroupCallEpoch(transactionID: keyed.transactionID, key: key), for: callID)
-			}
+			try await keyInitialRosterIfDue(ack: snapshot, current: update, callID: callID)
 
 			return WhatsAppOutgoingGroupCall(
 				callID: callID,
@@ -150,6 +222,18 @@ extension WhatsAppClient {
 			))
 			throw error
 		}
+	}
+
+	/// Generates and distributes the key an initial ack asked this device for, if one is due.
+	func keyInitialRosterIfDue(ack: GroupCallUpdate, current: GroupCallUpdate, callID: String) async throws {
+		guard let keyed = epochRoster(ack: ack, current: current, retained: groupCalls[callID]?.epochs.last?.transactionID),
+			  groupCalls[callID]?.keyInFlight != keyed.transactionID else {
+			return
+		}
+
+		groupCalls[callID]?.keyInFlight = keyed.transactionID
+		let key = try await fanOutGroupEpoch(keyed)
+		retainGroupEpoch(GroupCallEpoch(transactionID: keyed.transactionID, key: key), for: callID)
 	}
 
 	/// The members to ring, in the LID namespace media keys need. Someone with no known LID cannot be
@@ -430,6 +514,11 @@ extension WhatsAppClient {
 				CallJID.isSameUser(identity, me.id) || me.lid.map { CallJID.isSameUser(identity, $0) } == true
 			}
 		}
+	}
+
+	/// Whether a roster holds this device in the call, which is also how a waiting room lets someone in.
+	public func isOnRoster(_ update: GroupCallUpdate) -> Bool {
+		isThisDeviceConnected(to: update)
 	}
 
 	static func localRosterDevice(in update: GroupCallUpdate, ownLID: String, ownPhone: String) -> GroupCallDevice? {
@@ -717,7 +806,7 @@ extension WhatsAppClient {
 		} ?? false
 	}
 
-	private func isThisDeviceConnected(to update: GroupCallUpdate) -> Bool {
+	func isThisDeviceConnected(to update: GroupCallUpdate) -> Bool {
 		guard let me = authenticationState?.credentials.me, let lid = me.lid else {
 			return false
 		}

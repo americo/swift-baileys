@@ -5,6 +5,8 @@ public enum GroupCallLimits {
 	public static let maxParticipants = 32
 	/// The local endpoint takes one of the slots.
 	public static let maxRemoteParticipants = maxParticipants - 1
+	/// A call to one person, with no group, is a 1:1 call.
+	public static let minPeopleWithoutGroup = 2
 }
 
 /// Where a group call's signaling goes: the call service fans it out to the roster.

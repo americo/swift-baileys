@@ -33,12 +33,16 @@ public final class CallVideoEncoder: @unchecked Sendable {
 	private var forceKeyframe = true
 	private var firstPresentation: CMTime?
 	private var lastEncoded: CMTime?
+	private let firstTimestamp: UInt32
 	private let output: @Sendable (CallEncodedVideoFrame) -> Void
 
+	/// `firstTimestamp` is where this encoder's clock starts. A stream that moves to a new encoder has to
+	/// go on from where the last one stopped, since a receiver and the session drop what goes backwards.
 	public init(
 		width: Int,
 		height: Int,
 		bitrate: Int,
+		firstTimestamp: UInt32 = 0,
 		output: @escaping @Sendable (CallEncodedVideoFrame) -> Void
 	) throws {
 		guard width > 0, height > 0 else {
@@ -47,6 +51,7 @@ public final class CallVideoEncoder: @unchecked Sendable {
 
 		self.width = width
 		self.height = height
+		self.firstTimestamp = firstTimestamp
 		self.output = output
 
 		var created: VTCompressionSession?
@@ -112,7 +117,7 @@ public final class CallVideoEncoder: @unchecked Sendable {
 		lock.unlock()
 
 		let elapsed = max(0, CMTimeGetSeconds(CMTimeSubtract(presentationTime, first)))
-		let timestamp = UInt32(truncatingIfNeeded: UInt64(elapsed * Double(CallVideoRTPHeader.clockRate)))
+		let timestamp = firstTimestamp &+ UInt32(truncatingIfNeeded: UInt64(elapsed * Double(CallVideoRTPHeader.clockRate)))
 		let capturedAt = ContinuousClock.now
 		let properties: CFDictionary? = wantsKeyframe
 			? [kVTEncodeFrameOptionKey_ForceKeyFrame: true] as CFDictionary
