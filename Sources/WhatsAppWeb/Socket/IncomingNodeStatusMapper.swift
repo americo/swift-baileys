@@ -40,6 +40,10 @@ public enum IncomingCallStatusMapper {
 			.groupEpoch
 		case "mute_v2":
 			.mute
+		case "waiting_room_update":
+			.waitingRoom
+		case "screen_share":
+			.screenShare
 		default:
 			.ringing
 		}

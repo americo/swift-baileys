@@ -55,6 +55,14 @@ extension WhatsAppClient {
 			return true
 		}
 
+		if status == .waitingRoom {
+			if let ack = StanzaAck.build(for: node, type: callAckType(tag: infoChild.tag)) {
+				try? await sendNode(ack)
+			}
+			handleWaitingRoomStanza(node, action: infoChild, chatID: chatID, date: date)
+			return true
+		}
+
 		let cachedCall = callOfferCache[callID]
 		// A key alone says nothing: only a roster makes this a group call.
 		let isKnownGroup = cachedCall?.isGroup == true || groupCalls[callID]?.state.snapshot != nil
@@ -100,7 +108,10 @@ extension WhatsAppClient {
 			isMuted: status == .mute ? infoChild.attrs["mute-state"] == "1" : nil,
 			isNotice: infoChild.tag == "offer_notice",
 			isFromOwnAccount: isFromOwnAccount,
-			isJoinable: status != .offer && infoChild.attrs["joinable"] == "1"
+			isJoinable: status != .offer && infoChild.attrs["joinable"] == "1",
+			screenShareState: status == .screenShare
+				? infoChild.attrs["screenshare_state"].flatMap(Int.init).flatMap(CallScreenShareState.init(rawValue:))
+				: nil
 		)
 
 		if status == .offer {

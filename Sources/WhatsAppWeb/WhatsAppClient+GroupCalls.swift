@@ -23,7 +23,33 @@ struct GroupCallRecord: Sendable {
 	/// What each device stated of itself in its offer, preaccept or accept, for a 1:1 call that may yet
 	/// become a group call and has to name them.
 	var deviceCapabilities = [String: Data]()
+	/// Who is waiting to get into a link's call.
+	var waitingRoom: CallWaitingRoom?
 	let createdAt = Date()
+
+	enum WaitingRoomApply: Equatable {
+		case applied
+		case stale
+		case refused
+	}
+
+	/// Keeps the newest snapshot, for this call and this link.
+	mutating func applyWaitingRoom(_ room: CallWaitingRoom) -> WaitingRoomApply {
+		guard room.callID == state.callID, room.callCreator == state.callCreator else {
+			return .refused
+		}
+		if let current = waitingRoom {
+			guard current.link == room.link else {
+				return .refused
+			}
+			if let held = current.transactionID, let next = room.transactionID, next <= held {
+				return .stale
+			}
+		}
+
+		waitingRoom = room
+		return .applied
+	}
 
 	mutating func retain(_ epoch: GroupCallEpoch) {
 		guard !epochs.contains(where: { $0.transactionID == epoch.transactionID }) else {
@@ -126,12 +152,7 @@ extension WhatsAppClient {
 				throw WhatsAppVoiceCallError.missingRelay
 			}
 
-			if let keyed = epochRoster(ack: snapshot, current: update, retained: groupCalls[callID]?.epochs.last?.transactionID),
-			   groupCalls[callID]?.keyInFlight != keyed.transactionID {
-				groupCalls[callID]?.keyInFlight = keyed.transactionID
-				let key = try await fanOutGroupEpoch(keyed)
-				retainGroupEpoch(GroupCallEpoch(transactionID: keyed.transactionID, key: key), for: callID)
-			}
+			try await keyInitialRosterIfDue(ack: snapshot, current: update, callID: callID)
 
 			return WhatsAppOutgoingGroupCall(
 				callID: callID,
@@ -150,6 +171,18 @@ extension WhatsAppClient {
 			))
 			throw error
 		}
+	}
+
+	/// Generates and distributes the key an initial ack asked this device for, if one is due.
+	func keyInitialRosterIfDue(ack: GroupCallUpdate, current: GroupCallUpdate, callID: String) async throws {
+		guard let keyed = epochRoster(ack: ack, current: current, retained: groupCalls[callID]?.epochs.last?.transactionID),
+			  groupCalls[callID]?.keyInFlight != keyed.transactionID else {
+			return
+		}
+
+		groupCalls[callID]?.keyInFlight = keyed.transactionID
+		let key = try await fanOutGroupEpoch(keyed)
+		retainGroupEpoch(GroupCallEpoch(transactionID: keyed.transactionID, key: key), for: callID)
 	}
 
 	/// The members to ring, in the LID namespace media keys need. Someone with no known LID cannot be
@@ -430,6 +463,11 @@ extension WhatsAppClient {
 				CallJID.isSameUser(identity, me.id) || me.lid.map { CallJID.isSameUser(identity, $0) } == true
 			}
 		}
+	}
+
+	/// Whether a roster holds this device in the call, which is also how a waiting room lets someone in.
+	public func isOnRoster(_ update: GroupCallUpdate) -> Bool {
+		isThisDeviceConnected(to: update)
 	}
 
 	static func localRosterDevice(in update: GroupCallUpdate, ownLID: String, ownPhone: String) -> GroupCallDevice? {
@@ -717,7 +755,7 @@ extension WhatsAppClient {
 		} ?? false
 	}
 
-	private func isThisDeviceConnected(to update: GroupCallUpdate) -> Bool {
+	func isThisDeviceConnected(to update: GroupCallUpdate) -> Bool {
 		guard let me = authenticationState?.credentials.me, let lid = me.lid else {
 			return false
 		}

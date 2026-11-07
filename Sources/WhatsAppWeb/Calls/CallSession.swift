@@ -101,6 +101,8 @@ public actor CallSession {
 	public static let maximumVideoBitrate = 2_000_000
 	/// One stream goes to everyone in a group, so the path of the slowest sets the worth of a higher rate.
 	public static let maximumGroupVideoBitrate = 1_000_000
+	/// Reactions being repeated at once. Anyone faster than this loses the repeats of the oldest.
+	static let maxReactionResends = 64
 	/// Playout cadence of a group call, where the mixer is what produces audio.
 	public static let groupPlayoutInterval: Duration = .milliseconds(20)
 
@@ -129,6 +131,8 @@ public actor CallSession {
 	/// Pictures from each participant of a group call. Roomier than `receivedVideo`, since several
 	/// streams share it and a dropped picture costs its stream a keyframe.
 	public nonisolated let receivedParticipantVideo: AsyncStream<CallParticipantVideoFrame>
+	/// Reactions from the others in a group call.
+	public nonisolated let receivedReactions: AsyncStream<CallParticipantReaction>
 	/// Yields when the peer has stopped sending anything, or the relay path has closed. A hang-up does
 	/// not always reach this client as a stanza, and without this the call would stay up on its own.
 	public nonisolated let peerGone: AsyncStream<Void>
@@ -138,6 +142,7 @@ public actor CallSession {
 	private let videoSendEventsContinuation: AsyncStream<CallVideoSendEvent>.Continuation
 	private let peerGoneContinuation: AsyncStream<Void>.Continuation
 	private let receivedParticipantVideoContinuation: AsyncStream<CallParticipantVideoFrame>.Continuation
+	private let receivedReactionsContinuation: AsyncStream<CallParticipantReaction>.Continuation
 	/// Participant-indexed receive state, once this is a group call.
 	private var group: GroupMediaState?
 	private var playoutTask: Task<Void, Never>?
@@ -302,6 +307,7 @@ public actor CallSession {
 		(self.videoSendEvents, self.videoSendEventsContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(8))
 		(self.peerGone, self.peerGoneContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(1))
 		(self.receivedParticipantVideo, self.receivedParticipantVideoContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(48))
+		(self.receivedReactions, self.receivedReactionsContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(32))
 	}
 
 	/// Connects to the relay and waits for the Allocate to succeed.
@@ -574,6 +580,8 @@ public actor CallSession {
 		receivedContinuation.finish()
 		receivedVideoContinuation.finish()
 		receivedParticipantVideoContinuation.finish()
+		receivedReactionsContinuation.finish()
+		group?.cancelReactionResends()
 		videoSendEventsContinuation.finish()
 		peerGoneContinuation.finish()
 	}
@@ -999,15 +1007,23 @@ private final class GroupMediaState {
 	var keyframeAskedAt = [String: ContinuousClock.Instant]()
 	var keyframePending = Set<String>()
 	var nextPlayout: ContinuousClock.Instant?
+	/// This device's app data stream, which reactions go out on.
+	var appData: CallAudioPipeline
+	var reactionTransaction: UInt64 = 0
+	/// The newest reaction seen from each participant. A new media session starts its numbering over.
+	var reactionsSeen = [String: (pid: UInt32?, transaction: UInt64)]()
+	var reactionResends = [UInt64: Task<Void, Never>]()
 
 	init(
 		registry: CallGroupMediaRegistry,
 		streams: CallRelayAllocate.GroupStreams,
+		appData: CallAudioPipeline,
 		requiredEpochTransaction: UInt32?,
 		isDirectFallbackActive: Bool
 	) {
 		self.registry = registry
 		self.streams = streams
+		self.appData = appData
 		self.requiredEpochTransaction = requiredEpochTransaction
 		self.isDirectFallbackActive = isDirectFallbackActive
 	}
@@ -1029,6 +1045,12 @@ private final class GroupMediaState {
 		rtcpReplay.removeValue(forKey: id)
 		keyframeAskedAt.removeValue(forKey: id)
 		keyframePending.remove(id)
+		reactionsSeen.removeValue(forKey: id)
+	}
+
+	func cancelReactionResends() {
+		reactionResends.values.forEach { $0.cancel() }
+		reactionResends = [:]
 	}
 
 	func retainParticipants(_ active: Set<String>) {
@@ -1039,6 +1061,7 @@ private final class GroupMediaState {
 		rtcpReplay = rtcpReplay.filter { active.contains($0.key) }
 		keyframeAskedAt = keyframeAskedAt.filter { active.contains($0.key) }
 		keyframePending = keyframePending.filter { active.contains($0) }
+		reactionsSeen = reactionsSeen.filter { active.contains($0.key) }
 	}
 }
 
@@ -1177,6 +1200,15 @@ extension CallSession {
 		let state = GroupMediaState(
 			registry: registry,
 			streams: streams,
+			appData: try CallAudioPipeline(
+				callKey: configuration.callKey,
+				selfParticipantID: participantID,
+				peerParticipantID: configuration.peerParticipantID,
+				ssrc: streams.appData,
+				tagLength: tagLength,
+				payloadType: CallAppData.payloadType,
+				samplesPerPacket: CallAppData.timestampStride
+			),
 			requiredEpochTransaction: update.isRekeyRequested ? update.transactionID : nil,
 			isDirectFallbackActive: directPeer
 		)
@@ -1312,15 +1344,20 @@ extension CallSession {
 
 		var audio = pipeline
 		var pictures = video
+		var appData = group.appData
 		do {
 			try audio.rekeySend(callKey: epoch.key, selfParticipantID: participantID)
 			try pictures.rekeySend(callKey: epoch.key, selfParticipantID: participantID)
+			try appData.rekeySend(callKey: epoch.key, selfParticipantID: participantID)
 		} catch {
 			return
 		}
 
 		pipeline = audio
 		video = pictures
+		group.appData = appData
+		// Whoever a new key keeps out must not get the repeats of a reaction under it.
+		group.cancelReactionResends()
 		rtcpSendKeys = sendKeys
 		cname = CallRTCP.cname(ssrc: video.ssrc, callKey: epoch.key)
 		audioCNAME = CallRTCP.cname(ssrc: audioSSRC, callKey: epoch.key)
@@ -1351,6 +1388,9 @@ extension CallSession {
 			await handleGroupVideo(message, header: header, group: group)
 		} else if CallRTPHeader.isAudioPayloadType(header.payloadType) {
 			handleGroupAudio(message, header: header, group: group)
+		} else if header.payloadType == CallAppData.payloadType,
+				  let id = group.registry.participantID(forAppData: header.ssrc) {
+			handleGroupAppData(message, from: id, group: group)
 		} else if let id = group.registry.participantID(forSlot: header.ssrc),
 				  let carried = try? group.registry.unprotectAuxiliary(message, from: id) {
 			decodeCarriedAudio(carried, from: id, group: group)
@@ -1384,6 +1424,32 @@ extension CallSession {
 		} catch CallAudioPipeline.ReceiveError.authenticationFailed {
 			packetsRejected += 1
 			keysRejected += 1
+		} catch {
+			packetsRejected += 1
+		}
+	}
+
+	/// Each reaction arrives several times, and only its first counts.
+	private func handleGroupAppData(_ message: Data, from id: String, group: GroupMediaState) {
+		do {
+			guard let received = try group.registry.unprotectAppData(message, from: id),
+				  let receiver = group.registry.receivers[id] else {
+				return
+			}
+
+			var seen = group.reactionsSeen[id] ?? (pid: receiver.pid, transaction: 0)
+			if seen.pid != receiver.pid {
+				seen = (receiver.pid, 0)
+			}
+			for reaction in try CallAppData.decode(received.payload) where reaction.transactionID > seen.transaction {
+				seen.transaction = reaction.transactionID
+				receivedReactionsContinuation.yield(CallParticipantReaction(
+					participantID: id,
+					userJID: receiver.userJID,
+					emoji: reaction.emoji.isEmpty ? nil : reaction.emoji
+				))
+			}
+			group.reactionsSeen[id] = seen
 		} catch {
 			packetsRejected += 1
 		}
@@ -1555,6 +1621,61 @@ extension CallSession {
 		for report in videoReports.isEmpty ? [nil] : videoReports {
 			await sendRTCP(videoSenderReport(report: report))
 		}
+	}
+
+	// MARK: Reactions
+
+	/// Sends a reaction to everyone in a group call. An empty one takes back the last. A 1:1 call has no
+	/// app data stream to carry it.
+	public func sendReaction(_ emoji: String) async throws {
+		guard isRunning, let group, group.isEpochReady else {
+			throw CallSessionError.notRunning
+		}
+
+		group.reactionTransaction &+= 1
+		if group.reactionTransaction == 0 {
+			group.reactionTransaction = 1
+		}
+		let transaction = group.reactionTransaction
+		let payload = try CallAppData.encode(transactionID: transaction, emoji: emoji)
+		try await sendAppData(payload, group: group)
+
+		if group.reactionResends.count >= Self.maxReactionResends,
+		   let oldest = group.reactionResends.keys.min() {
+			group.reactionResends.removeValue(forKey: oldest)?.cancel()
+		}
+		group.reactionResends[transaction] = Task { [weak self] in
+			for _ in 1..<CallAppData.sendCount {
+				try? await Task.sleep(for: CallAppData.resendInterval)
+				guard !Task.isCancelled else {
+					return
+				}
+
+				await self?.resendReaction(payload)
+			}
+			await self?.finishReactionResends(transaction)
+		}
+	}
+
+	private func resendReaction(_ payload: Data) async {
+		guard isRunning, let group, group.isEpochReady else {
+			return
+		}
+
+		try? await sendAppData(payload, group: group)
+	}
+
+	var pendingReactionResends: Int {
+		group?.reactionResends.count ?? 0
+	}
+
+	private func finishReactionResends(_ transaction: UInt64) {
+		group?.reactionResends.removeValue(forKey: transaction)
+	}
+
+	private func sendAppData(_ payload: Data, group: GroupMediaState) async throws {
+		let packet = try group.appData.protect(payload)
+		try await link.send(packet)
 	}
 
 	// MARK: Playout

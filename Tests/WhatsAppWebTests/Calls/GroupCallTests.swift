@@ -1115,7 +1115,7 @@ struct GroupCallSessionTests {
 
 // MARK: - Client
 
-private extension WhatsAppClient {
+extension WhatsAppClient {
 	/// Skips the handshake: these tests answer by hand what would come over it.
 	func useTransport(_ transport: any WhatsAppWebSocketTransport) {
 		self.transport = transport
@@ -1455,5 +1455,116 @@ private extension Data {
 			index = next
 		}
 		self.init(bytes)
+	}
+}
+
+@Suite("Reactions in a group call", .serialized)
+struct GroupCallReactionTests {
+	private let alice = "100001:1@lid"
+	private let bob = "200002:1@lid"
+	private let key = Data(repeating: 0x42, count: 32)
+
+	private func pair(fake: FakeGroupRelay) async throws -> (CallSession, CallSession) {
+		let roster = update(
+			1,
+			[participant("100001", pid: 0), participant("200002", pid: 1)],
+			relay: relay(transaction: 1)
+		)
+		func make(_ me: String, leg: Int) async throws -> CallSession {
+			try await CallSession(
+				configuration: CallSession.Configuration(
+					callID: "CALL",
+					selfParticipantID: me,
+					peerParticipantID: me,
+					callKey: Data(count: 32),
+					relay: try #require(roster.relay),
+					groupUpdate: roster
+				),
+				link: FakeGroupLink(relay: fake, leg: leg)
+			)
+		}
+
+		let a = try await make(alice, leg: 0)
+		let b = try await make(bob, leg: 1)
+		try await a.start()
+		try await b.start()
+		return (a, b)
+	}
+
+	@Test("a reaction reaches the others once, however many times it is sent, under the sender's name")
+	func arrivesOnce() async throws {
+		let fake = FakeGroupRelay()
+		let (a, b) = try await pair(fake: fake)
+		let epoch = GroupCallEpoch(transactionID: 1, key: key)
+		try await a.applyGroupEpoch(epoch)
+		try await b.applyGroupEpoch(epoch)
+
+		try await a.sendReaction("👍")
+		// Time for all ten copies to go out.
+		try await Task.sleep(for: CallAppData.resendInterval * (CallAppData.sendCount + 2))
+		try await a.sendReaction("")
+		try await Task.sleep(for: .milliseconds(100))
+		await b.stop()
+
+		var received = [CallParticipantReaction]()
+		for await reaction in b.receivedReactions {
+			received.append(reaction)
+		}
+		#expect(received == [
+			CallParticipantReaction(participantID: alice, userJID: "100001@lid", emoji: "👍"),
+			CallParticipantReaction(participantID: alice, userJID: "100001@lid", emoji: nil)
+		])
+		await a.stop()
+	}
+
+	@Test("a reaction waits for the key like the rest of a group's media")
+	func needsKey() async throws {
+		let fake = FakeGroupRelay()
+		let (a, b) = try await pair(fake: fake)
+
+		await #expect(throws: CallSessionError.self) {
+			try await a.sendReaction("👍")
+		}
+		await a.stop()
+		await b.stop()
+	}
+
+	@Test("a 1:1 call has no stream for a reaction")
+	func notInDirectCalls() async throws {
+		let fake = FakeGroupRelay()
+		let session = try await CallSession(
+			configuration: CallSession.Configuration(
+				callID: "CALL",
+				selfParticipantID: alice,
+				peerParticipantID: bob,
+				callKey: key,
+				relay: relay(transaction: nil)
+			),
+			link: FakeGroupLink(relay: fake, leg: 0)
+		)
+		try await session.start()
+		await #expect(throws: CallSessionError.self) {
+			try await session.sendReaction("👍")
+		}
+		await session.stop()
+	}
+
+	@Test("the repeats of a reaction stop at a new key")
+	func rekeyStopsRepeats() async throws {
+		let fake = FakeGroupRelay()
+		let (a, b) = try await pair(fake: fake)
+		try await a.applyGroupEpoch(GroupCallEpoch(transactionID: 1, key: key))
+		try await b.applyGroupEpoch(GroupCallEpoch(transactionID: 1, key: key))
+
+		try await a.sendReaction("👍")
+		try await a.applyGroupUpdate(update(
+			2,
+			[participant("100001", pid: 0), participant("200002", pid: 1)],
+			relay: relay(transaction: 1)
+		))
+		try await a.applyGroupEpoch(GroupCallEpoch(transactionID: 2, key: Data(repeating: 0x43, count: 32)))
+		#expect(await a.pendingReactionResends == 0)
+		await a.stop()
+		await b.stop()
 	}
 }

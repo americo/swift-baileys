@@ -18,6 +18,10 @@ public enum WhatsAppCallUpdateType: String, Sendable {
 	case groupEpoch
 	/// A participant's microphone, carried by `isMuted`.
 	case mute
+	/// Who is waiting to get into a link's call, carried by `waitingRoom`.
+	case waitingRoom
+	/// A participant's video becoming their screen or going back, carried by `screenShareState`.
+	case screenShare
 }
 
 public struct WhatsAppCallEvent: Equatable, Sendable {
@@ -51,6 +55,8 @@ public struct WhatsAppCallEvent: Equatable, Sendable {
 	public let isFromOwnAccount: Bool
 	/// On a `.terminate`: it ends the call for this device only, and the call can be joined again.
 	public let isJoinable: Bool
+	public let waitingRoom: CallWaitingRoom?
+	public let screenShareState: CallScreenShareState?
 
 	public init(
 		chatID: String,
@@ -73,7 +79,9 @@ public struct WhatsAppCallEvent: Equatable, Sendable {
 		isMuted: Bool? = nil,
 		isNotice: Bool = false,
 		isFromOwnAccount: Bool = false,
-		isJoinable: Bool = false
+		isJoinable: Bool = false,
+		waitingRoom: CallWaitingRoom? = nil,
+		screenShareState: CallScreenShareState? = nil
 	) {
 		self.chatID = chatID
 		self.from = from
@@ -96,6 +104,8 @@ public struct WhatsAppCallEvent: Equatable, Sendable {
 		self.isNotice = isNotice
 		self.isFromOwnAccount = isFromOwnAccount
 		self.isJoinable = isJoinable
+		self.waitingRoom = waitingRoom
+		self.screenShareState = screenShareState
 	}
 
 	/// A `reject` that speaks only for the device that sent it, so the call stays alive.

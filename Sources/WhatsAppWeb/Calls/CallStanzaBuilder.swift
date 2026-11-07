@@ -524,6 +524,104 @@ public enum CallStanzaBuilder {
 		))
 	}
 
+	// MARK: Call links
+
+	/// Where requests about a link go, before there is any call to address them to.
+	public static let callService = "@\(JIDServer.call.rawValue)"
+
+	/// `<link_create>`: asks the service for a new link. The ack has it.
+	public static func linkCreate(media: CallLinkMedia, stanzaID: String) -> BinaryNode {
+		wrap(to: callService, stanzaID: stanzaID, action: BinaryNode(
+			tag: "link_create",
+			attrs: ["media": media.rawValue]
+		))
+	}
+
+	/// `<link_query>`: what a link says about itself, without joining it.
+	public static func linkQuery(link: CallLink, stanzaID: String) -> BinaryNode {
+		wrap(to: callService, stanzaID: stanzaID, action: BinaryNode(
+			tag: "link_query",
+			attrs: ["token": link.token, "media": link.media.rawValue]
+		))
+	}
+
+	/// `<link_join>`: audio → [video] → net → capability. The ack lets this device in, or has it wait.
+	public static func linkJoin(link: CallLink, stanzaID: String) -> BinaryNode {
+		let isVideo = link.media == .video
+		var children = [audioNode("16000")]
+		if isVideo {
+			children.append(BinaryNode(tag: "video", attrs: [
+				"dec": videoDecoders,
+				"device_orientation": uprightOrientation
+			]))
+		}
+		children.append(BinaryNode(tag: "net", attrs: ["medium": "2"]))
+		children.append(capabilityNode(isVideo ? CallCapability.standardOpusVideoOffer : CallCapability.standardOpusOffer))
+
+		return wrap(to: callService, stanzaID: stanzaID, action: BinaryNode(
+			tag: "link_join",
+			attrs: ["token": link.token, "media": link.media.rawValue],
+			content: .nodes(children)
+		))
+	}
+
+	// MARK: Waiting room
+
+	/// `<waiting_room_toggle>`: whether people need letting into a link's call.
+	public static func waitingRoomToggle(callID: String, callCreator: String, enabled: Bool, stanzaID: String) -> BinaryNode {
+		wrap(to: groupCallScope(callID: callID), stanzaID: stanzaID, action: BinaryNode(
+			tag: "waiting_room_toggle",
+			attrs: ["call-id": callID, "call-creator": callCreator, "enabled": enabled ? "1" : "0"]
+		))
+	}
+
+	/// `<heartbeat type="waiting_room">`: says, while waiting to be let in, that this device is still there.
+	public static func waitingRoomHeartbeat(callID: String, callCreator: String, stanzaID: String) -> BinaryNode {
+		wrap(to: groupCallScope(callID: callID), stanzaID: stanzaID, action: BinaryNode(
+			tag: "heartbeat",
+			attrs: ["call-id": callID, "call-creator": callCreator, "type": "waiting_room"]
+		))
+	}
+
+	public static func waitingRoomAdmit(callID: String, callCreator: String, user: String, stanzaID: String) -> BinaryNode {
+		wrap(to: groupCallScope(callID: callID), stanzaID: stanzaID, action: action(
+			"waiting_room_admit",
+			callID,
+			callCreator,
+			[BinaryNode(tag: "user", attrs: ["jid": user])]
+		))
+	}
+
+	public static func waitingRoomDeny(callID: String, callCreator: String, user: String, stanzaID: String) -> BinaryNode {
+		wrap(to: groupCallScope(callID: callID), stanzaID: stanzaID, action: action(
+			"waiting_room_deny",
+			callID,
+			callCreator,
+			[BinaryNode(tag: "user", attrs: ["jid": user])]
+		))
+	}
+
+	// MARK: Screen sharing
+
+	/// `<screen_share>`: this device's video has become its screen, or has stopped being it.
+	public static func screenShare(
+		callID: String,
+		to: String,
+		callCreator: String,
+		stanzaID: String,
+		state: CallScreenShareState
+	) -> BinaryNode {
+		wrap(to: to, stanzaID: stanzaID, action: BinaryNode(
+			tag: "screen_share",
+			attrs: [
+				"call-id": callID,
+				"call-creator": callCreator,
+				"screenshare_state": String(state.rawValue),
+				"version": "2"
+			]
+		))
+	}
+
 	private static func action(
 		_ tag: String,
 		_ callID: String,
