@@ -104,13 +104,58 @@ struct WhatsAppClientOwnDeviceFanOutTests {
 		#expect(message.deviceSentMessage.destinationJid == "123@s.whatsapp.net")
 	}
 
+	@Test("a retry for our phone by LID is addressed the way the server accepts")
+	func retryForOwnPhoneByLIDHasNoZeroDevice() async throws {
+		let builder = MessageRelayBuilder(encoder: MessageEncoder(randomByte: { 0x00 }), encryptor: FanOutRecordingEncryptor())
+
+		let stanza = try await builder.buildRetryMessageStanza(
+			to: "321@lid",
+			messageID: "3EB0RETRYLID",
+			message: MessageContentBuilder.text("hello"),
+			participantJID: "888:0@lid",
+			retryCount: 1,
+			localUserJID: Self.me.id,
+			localUserLID: Self.me.lid
+		)
+
+		#expect(stanza.attrs["to"] == "888@lid")
+		#expect(stanza.attrs["recipient"] == "321@lid")
+	}
+
+	@Test("a retry naming the chat by LID finds a message sent by phone number")
+	func retryFindsMessageSentUnderOtherAddress() async {
+		let client = makeClient(own: [:])
+		await client.cacheRecentSentMessage(
+			destinationJID: "123@s.whatsapp.net",
+			id: "3EB0SENT",
+			message: MessageContentBuilder.text("hello")
+		)
+
+		let byLID = await client.retrySource(requestedDestinationJID: "321:0@lid", id: "3EB0SENT")
+		#expect(byLID?.destinationJID == "321@lid")
+		#expect(byLID?.message.message.extendedTextMessage.text == "hello")
+		#expect(await client.retrySource(requestedDestinationJID: "123@s.whatsapp.net", id: "3EB0SENT")?.destinationJID == "123@s.whatsapp.net")
+		#expect(await client.retrySource(requestedDestinationJID: "321@lid", id: "3EB0OTHER") == nil)
+		#expect(await client.retrySource(requestedDestinationJID: "1@g.us", id: "3EB0SENT") == nil)
+	}
+
 	private func fanOut(
 		to destination: String,
 		recipients: [String],
 		own: [String: [String]],
 		attributes: [String: String] = [:]
 	) async -> [String] {
-		let client = WhatsAppClient(
+		let client = makeClient(own: own)
+
+		return await client.directFanOutDeviceJIDs(
+			to: destination,
+			recipientDeviceJIDs: recipients,
+			additionalAttributes: attributes
+		)
+	}
+
+	private func makeClient(own: [String: [String]]) -> WhatsAppClient {
+		WhatsAppClient(
 			authenticationState: AuthenticationState(
 				credentials: sampleMessageSendCredentials(me: Self.me),
 				keys: InMemorySignalKeyStore(storage: [:])
@@ -120,12 +165,6 @@ struct WhatsAppClientOwnDeviceFanOutTests {
 			messageDeviceResolver: PerUserDeviceResolver(devices: own),
 			signalSessionPreparer: StubSignalSessionPreparer(callOrder: MessageSendCallOrder()),
 			messageEncoder: MessageEncoder(randomByte: { 0x00 })
-		)
-
-		return await client.directFanOutDeviceJIDs(
-			to: destination,
-			recipientDeviceJIDs: recipients,
-			additionalAttributes: attributes
 		)
 	}
 }

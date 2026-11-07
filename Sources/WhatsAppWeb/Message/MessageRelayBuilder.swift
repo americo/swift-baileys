@@ -310,11 +310,11 @@ struct MessageRelayBuilder: Sendable {
 		if destinationJID.isGroupJID {
 			attrs.append(("to", destinationJID))
 			attrs.append(("participant", participantJID))
-		} else if JID.areSameUser(participantJID, localUserJID) || JID.areSameUser(participantJID, localUserLID) {
-			attrs.append(("to", participantJID))
+		} else if isOwnDeviceCopy {
+			attrs.append(("to", Self.addressableDeviceJID(participantJID)))
 			attrs.append(("recipient", destinationJID))
 		} else {
-			attrs.append(("to", participantJID))
+			attrs.append(("to", Self.addressableDeviceJID(participantJID)))
 		}
 
 		let contentNodes = [
@@ -333,6 +333,15 @@ struct MessageRelayBuilder: Sendable {
 			attrs: BinaryNodeAttributes(attrs),
 			content: .nodes(contentNodes)
 		)
+	}
+
+	/// Retries name the primary device as `user:0@server`; the server only takes it without the device.
+	private static func addressableDeviceJID(_ jid: String) -> String {
+		guard let parsed = JID(jid), parsed.device == 0 else {
+			return jid
+		}
+
+		return JID.encode(user: parsed.user, server: parsed.server)
 	}
 
 	private func senderKeyParticipantNodes(

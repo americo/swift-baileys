@@ -12,11 +12,11 @@ extension WhatsAppClient {
 
 	@discardableResult
 	public func resendCachedMessages(for request: MessageRetryRequest) async throws -> [String] {
-		guard let destinationJID = request.key.remoteJID else {
+		let messageIDs = retryMessageIDs(from: request)
+		guard let destinationJID = request.key.remoteJID ?? peerDestinationJID(of: messageIDs, requesterJID: request.requesterJID) else {
 			throw WhatsAppClientError.missingMessageDestination
 		}
 
-		let messageIDs = retryMessageIDs(from: request)
 		guard !messageIDs.isEmpty else {
 			throw WhatsAppClientError.missingReceiptMessageIDs
 		}
@@ -65,6 +65,20 @@ extension WhatsAppClient {
 		)
 	}
 
+	/// A retry from our own phone names no recipient, as what it could not read was sent to ourselves.
+	/// The phone may answer by LID about a request sent by phone number, or the reverse.
+	private func peerDestinationJID(of messageIDs: [String], requesterJID: String) -> String? {
+		let me = authenticationState?.credentials.me
+		guard OwnDeviceAddressing.isOwnUser(requesterJID, localJID: me?.id, localLID: me?.lid) else {
+			return nil
+		}
+
+		let ownJIDs = [me?.id, me?.lid].compactMap { $0.flatMap { JID($0)?.normalizedUser } }
+		return ownJIDs.first { jid in
+			messageIDs.contains { recentSentMessageEntry(destinationJID: jid, id: $0)?.peerStanza != nil }
+		}
+	}
+
 	private func injectRetrySessionBundleIfAvailable(_ request: MessageRetryRequest) async throws -> Bool {
 		guard let retrySessionInjector,
 			  let bundle = request.sessionBundle else {
@@ -105,28 +119,36 @@ extension WhatsAppClient {
 		var resentIDs: [String] = []
 		let builder = MessageRelayBuilder(encoder: messageEncoder, encryptor: encryptor)
 		for id in messageIDs {
-			guard let message = recentSentMessage(destinationJID: destinationJID, id: id) else {
+			guard let source = retrySource(requestedDestinationJID: destinationJID, id: id) else {
 				continue
 			}
+
+			let sent = source.message
 
 			let retryKey = RetryResendKey(destinationJID: destinationJID, messageID: id, requesterJID: requesterJID)
 			guard canResendMessage(for: retryKey) else {
 				continue
 			}
 
-			guard !requesterDeviceJIDs.isEmpty else {
+			// Peer requests are for the primary phone, the bare JID or device 0.
+			let deviceJIDs = sent.peerStanza == nil
+				? requesterDeviceJIDs
+				: requesterDeviceJIDs.filter { (JID($0)?.device ?? 0) == 0 }
+			guard !deviceJIDs.isEmpty else {
 				continue
 			}
 
-			for deviceJID in requesterDeviceJIDs {
+			for deviceJID in deviceJIDs {
 				let stanza = try await builder.buildRetryMessageStanza(
-					to: destinationJID,
+					to: source.destinationJID,
 					messageID: id,
-					message: message,
+					message: sent.message,
 					participantJID: deviceJID,
 					retryCount: retryCount,
 					localUserJID: authenticationState?.credentials.me?.id,
-					localUserLID: authenticationState?.credentials.me?.lid
+					localUserLID: authenticationState?.credentials.me?.lid,
+					additionalAttributes: sent.peerStanza?.attributes ?? [:],
+					additionalNodes: sent.peerStanza?.nodes ?? []
 				)
 				try await sendNode(stanza)
 			}
@@ -146,9 +168,11 @@ extension WhatsAppClient {
 		var resentIDs: [String] = []
 		let builder = MessageRelayBuilder(encoder: messageEncoder, encryptor: encryptor)
 		for id in messageIDs {
-			guard let message = recentSentMessage(destinationJID: destinationJID, id: id) else {
+			guard let source = retrySource(requestedDestinationJID: destinationJID, id: id) else {
 				continue
 			}
+
+			let sent = source.message
 
 			let retryKey = RetryResendKey(
 				destinationJID: destinationJID,
@@ -160,13 +184,15 @@ extension WhatsAppClient {
 			}
 
 			let stanza = try await builder.buildRetryMessageStanza(
-				to: destinationJID,
+				to: source.destinationJID,
 				messageID: id,
-				message: message,
+				message: sent.message,
 				participantJID: request.requesterJID,
 				retryCount: request.retryCount,
 				localUserJID: authenticationState?.credentials.me?.id,
-				localUserLID: authenticationState?.credentials.me?.lid
+				localUserLID: authenticationState?.credentials.me?.lid,
+				additionalAttributes: sent.peerStanza?.attributes ?? [:],
+				additionalNodes: sent.peerStanza?.nodes ?? []
 			)
 			try await sendNode(stanza)
 			recordRetryResend(for: retryKey)
@@ -184,22 +210,53 @@ extension WhatsAppClient {
 		retryResendCounts[key] = (retryResendCounts[key] ?? 0) + 1
 	}
 
-	func cacheRecentSentMessage(destinationJID: String, id: String, message: Proto_Message) {
+	func cacheRecentSentMessage(
+		destinationJID: String,
+		id: String,
+		message: Proto_Message,
+		additionalAttributes: [String: String] = [:],
+		additionalNodes: [BinaryNode] = []
+	) {
 		pruneExpiredRecentSentMessages()
 		let key = RecentSentMessageKey(destinationJID: destinationJID, id: id)
 		if recentSentMessages[key] == nil {
 			recentSentMessageOrder.append(key)
 		}
 
-		recentSentMessages[key] = RecentSentMessage(message: message, timestamp: Date())
+		recentSentMessages[key] = RecentSentMessage(
+			message: message,
+			timestamp: Date(),
+			peerStanza: additionalAttributes["category"] == "peer"
+				? PeerStanzaParts(attributes: additionalAttributes, nodes: additionalNodes)
+				: nil
+		)
 		while recentSentMessageOrder.count > recentSentMessageLimit {
 			recentSentMessages.removeValue(forKey: recentSentMessageOrder.removeFirst())
 		}
 	}
 
-	private func recentSentMessage(destinationJID: String, id: String) -> Proto_Message? {
+	/// The sent message a retry asks for, and the address to name it by in the resend. A retry can name
+	/// the conversation by LID when it was sent by phone number, or the reverse, so an exact miss falls
+	/// back to the message id. The resend answers in the address the requester used: the server refuses
+	/// a LID `to` with a phone-number `recipient` (error 400).
+	func retrySource(requestedDestinationJID: String, id: String) -> (destinationJID: String, message: RecentSentMessage)? {
+		if let exact = recentSentMessageEntry(destinationJID: requestedDestinationJID, id: id) {
+			return (requestedDestinationJID, exact)
+		}
+
+		guard !requestedDestinationJID.isGroupJID,
+			  let match = recentSentMessages.first(where: { $0.key.id == id && !$0.key.destinationJID.isGroupJID }) else {
+			WhatsAppLog.logger.notice("message retry id=\(id, privacy: .public) asked for \(requestedDestinationJID, privacy: .public): not in the recent sends")
+			return nil
+		}
+
+		WhatsAppLog.logger.notice("message retry id=\(id, privacy: .public) asked for \(requestedDestinationJID, privacy: .public), sent to \(match.key.destinationJID, privacy: .public)")
+		return (JID(requestedDestinationJID)?.normalizedUser ?? requestedDestinationJID, match.value)
+	}
+
+	private func recentSentMessageEntry(destinationJID: String, id: String) -> RecentSentMessage? {
 		pruneExpiredRecentSentMessages()
-		return recentSentMessages[RecentSentMessageKey(destinationJID: destinationJID, id: id)]?.message
+		return recentSentMessages[RecentSentMessageKey(destinationJID: destinationJID, id: id)]
 	}
 
 	private func pruneExpiredRecentSentMessages(now: Date = Date()) {
@@ -229,6 +286,13 @@ struct RecentSentMessageKey: Hashable, Sendable {
 struct RecentSentMessage: Sendable {
 	let message: Proto_Message
 	let timestamp: Date
+	/// What a peer message's stanza carried: without it a resend looks like a copy of a sent message.
+	let peerStanza: PeerStanzaParts?
+}
+
+struct PeerStanzaParts: Sendable {
+	let attributes: [String: String]
+	let nodes: [BinaryNode]
 }
 
 struct RetryResendKey: Hashable, Sendable {

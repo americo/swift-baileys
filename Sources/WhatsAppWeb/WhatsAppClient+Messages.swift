@@ -524,7 +524,13 @@ extension WhatsAppClient {
 			message: message,
 			additionalAttributes: additionalAttributes
 		)
-		cacheRecentSentMessage(destinationJID: destinationJID, id: resolvedMessageID, message: message)
+		cacheRecentSentMessage(
+			destinationJID: destinationJID,
+			id: resolvedMessageID,
+			message: message,
+			additionalAttributes: additionalAttributes,
+			additionalNodes: additionalNodes
+		)
 		return resolvedMessageID
 	}
 
