@@ -255,8 +255,8 @@ public struct CallVideoPipeline {
 
 	public let ssrc: UInt32
 
-	private let sendKeys: CallSRTPKeys
-	private let receiveKeys: CallSRTPKeys
+	private var sendKeys: CallSRTPKeys
+	private var receiveKeys: CallSRTPKeys
 	private let tagLength: Int
 
 	private var sequence: UInt16 = 0
@@ -292,6 +292,31 @@ public struct CallVideoPipeline {
 		)
 		self.tagLength = min(max(tagLength, 1), 20)
 		self.ssrc = ssrc
+	}
+
+	// MARK: Group keys
+
+	/// Moves sending to a new group media key, carrying on the same stream.
+	public mutating func rekeySend(callKey: Data, selfParticipantID: String) throws {
+		sendKeys = try CallMediaCrypto.deriveRTPKeys(
+			callKey: callKey,
+			participantID: CallMediaCrypto.formatParticipantID(selfParticipantID)
+		)
+	}
+
+	/// Moves receiving to a new group media key, keeping rollover state and what is half reassembled.
+	public mutating func rekeyReceive(callKey: Data, peerParticipantID: String) throws {
+		receiveKeys = try CallMediaCrypto.deriveRTPKeys(
+			callKey: callKey,
+			participantID: CallMediaCrypto.formatParticipantID(peerParticipantID)
+		)
+	}
+
+	/// Forgets a half-built picture, so it cannot complete under a later roster.
+	public mutating func resetReassembly() {
+		depacketizer.reset()
+		pictureOrientation = nil
+		expectedSequence = nil
 	}
 
 	// MARK: Sending

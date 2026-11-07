@@ -113,7 +113,7 @@ public actor WhatsAppClient {
 	let messageIDGenerator: MessageIDGenerator
 	private let transportFactory: @Sendable (URL) -> any WhatsAppWebSocketTransport
 	let requestCoordinator = IQRequestCoordinator()
-	private var transport: (any WhatsAppWebSocketTransport)?
+	var transport: (any WhatsAppWebSocketTransport)?
 	private var receiveTask: Task<Void, Never>?
 	/// Last frame handed to the socket. See `sendInOrder`.
 	private var lastOutboundFrame: Task<Void, Error>?
@@ -123,6 +123,8 @@ public actor WhatsAppClient {
 	var callOfferCache: [String: WhatsAppCallEvent] = [:]
 	/// Raw `<call>` stanzas of offers still ringing, kept so the call key can be decrypted on accept.
 	var callOfferNodes: [String: BinaryNode] = [:]
+	/// Rosters and media keys of group calls, ahead of whichever media session ends up using them.
+	var groupCalls: [String: GroupCallRecord] = [:]
 	var recentSentMessages: [RecentSentMessageKey: RecentSentMessage] = [:]
 	var recentSentMessageOrder: [RecentSentMessageKey] = []
 	var retryResendCounts: [RetryResendKey: Int] = [:]

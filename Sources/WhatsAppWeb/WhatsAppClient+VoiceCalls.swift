@@ -10,6 +10,13 @@ public enum WhatsAppVoiceCallError: Error, Equatable, Sendable {
 	case peerLIDUnknown(String)
 	case missingRelay
 	case offerRejected(String)
+	/// More members than a call holds, counting this device.
+	case groupTooLarge(Int)
+	case alreadyInCall
+	/// Going back into a call that has ended meanwhile.
+	case callOver
+	/// Going back into a call was refused, with this status.
+	case rejoinRefused(String)
 }
 
 /// An outgoing voice call whose `<offer>` was accepted by the server.
@@ -253,7 +260,8 @@ extension WhatsAppClient {
 		_ state: CallVideoState,
 		callID: String,
 		to: String,
-		callCreator: String
+		callCreator: String,
+		transactionID: UInt32? = nil
 	) async throws {
 		let announcesDecoder = state != .stopped && state != .upgradeReject && state != .upgradeCancel
 			&& state != .upgradeCancelByTimeout
@@ -264,7 +272,9 @@ extension WhatsAppClient {
 			stanzaID: messageIDGenerator.generate(),
 			state: state,
 			decoders: announcesDecoder ? CallStanzaBuilder.videoDecoders : nil,
-			deviceOrientation: announcesDecoder ? CallStanzaBuilder.uprightOrientation : nil
+			// Official clients state a rotation on every `<video>` in a group, where they are numbered.
+			deviceOrientation: announcesDecoder || transactionID != nil ? CallStanzaBuilder.uprightOrientation : nil,
+			transactionID: transactionID
 		))
 	}
 
@@ -364,7 +374,7 @@ extension WhatsAppClient {
 
 	/// Participant id of the device that answered. It may answer in the phone-number namespace, in
 	/// which case its device number moves onto the peer's LID.
-	static func answeringParticipantID(peer: String, sender: String) -> String {
+	public static func answeringParticipantID(peer: String, sender: String) -> String {
 		if sender.hasSuffix("@lid") {
 			return sender
 		}
@@ -382,7 +392,7 @@ extension WhatsAppClient {
 	}
 
 	/// A phone-number JID mapped to its LID, or the JID unchanged when it already is one.
-	private func resolvePeerLID(_ peer: String) async throws -> String {
+	func resolvePeerLID(_ peer: String) async throws -> String {
 		if peer.hasSuffix("@lid") {
 			return peer
 		}
@@ -394,7 +404,7 @@ extension WhatsAppClient {
 		return lid.contains("@") ? lid : "\(lid)@lid"
 	}
 
-	private var ownDeviceJIDs: [String] {
+	var ownDeviceJIDs: [String] {
 		guard let me = authenticationState?.credentials.me else {
 			return []
 		}
@@ -443,7 +453,7 @@ extension WhatsAppClient {
 		return beforeAt.split(separator: ":", maxSplits: 1).first.map(String.init) ?? beforeAt
 	}
 
-	private func deviceIdentityIfNeeded(for keys: [CallOfferDeviceKey]) throws -> Data? {
+	func deviceIdentityIfNeeded(for keys: [CallOfferDeviceKey]) throws -> Data? {
 		guard keys.contains(where: { $0.encryptionType == "pkmsg" }),
 			  let account = authenticationState?.credentials.account else {
 			return nil
