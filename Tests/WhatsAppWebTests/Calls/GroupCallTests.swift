@@ -98,6 +98,47 @@ struct GroupCallStanzaTests {
 		#expect(users[1].firstChild(named: "device")?.firstChild(named: "capability") == nil)
 	}
 
+	@Test("an offer to chosen people names no group")
+	func offerWithoutGroup() throws {
+		let node = CallStanzaBuilder.groupOffer(
+			callID: "CALL",
+			callCreator: "100001:1@lid",
+			stanzaID: "REQ",
+			groupJID: nil,
+			participants: [
+				GroupCallParticipant(jid: "100001@lid", devices: [GroupCallDevice(jid: "100001:1@lid")]),
+				GroupCallParticipant(jid: "200002@lid", devices: [GroupCallDevice(jid: "200002:2@lid")]),
+				GroupCallParticipant(jid: "300003@lid", devices: [GroupCallDevice(jid: "300003:0@lid")])
+			]
+		)
+
+		#expect(node.attrs["to"] == "CALL@call")
+		let offer = try #require(node.firstChild(named: "offer"))
+		#expect(offer.attrs["group-jid"] == nil)
+		#expect(try #require(offer.firstChild(named: "group_info")).children(named: "user").count == 3)
+	}
+
+	@Test("chosen people are rung once each, and never this account")
+	func peopleToRing() throws {
+		let targets = try WhatsAppClient.peopleToRing(
+			["200002:3@lid", "300003@lid", "200002@lid", "100001:1@lid"],
+			ownLID: "100001:1@lid"
+		)
+		#expect(targets == ["200002@lid", "300003@lid"])
+	}
+
+	@Test("a call to one person is not a call with no group", arguments: [
+		["200002@lid"],
+		["200002:1@lid", "200002:2@lid"],
+		["200002@lid", "100001@lid"],
+		[]
+	])
+	func tooFewPeople(people: [String]) {
+		#expect(throws: WhatsAppVoiceCallError.noDevices) {
+			try WhatsAppClient.peopleToRing(people, ownLID: "100001:1@lid")
+		}
+	}
+
 	@Test("the call scope survives the wire")
 	func callScopeRoundTrip() throws {
 		let node = CallStanzaBuilder.terminate(
