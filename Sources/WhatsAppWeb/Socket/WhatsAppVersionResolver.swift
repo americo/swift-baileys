@@ -116,3 +116,38 @@ public enum WhatsAppVersionResolver {
 public enum WhatsAppVersionResolverError: Error, Equatable, Sendable {
 	case httpStatus(Int)
 }
+
+/// The WhatsApp Web version sent at login, looked up once and reused for a few hours, so a run of
+/// reconnections does not fetch `web.whatsapp.com` every time. A failed lookup is not kept.
+public actor WhatsAppVersionCache {
+	public static let shared = WhatsAppVersionCache()
+
+	private let lifetime: Duration
+	private let fetch: @Sendable () async -> LatestWhatsAppVersionResult
+	private var cached: (version: WhatsAppVersion, fetchedAt: ContinuousClock.Instant)?
+
+	public init(
+		lifetime: Duration = .seconds(6 * 3600),
+		fetch: @escaping @Sendable () async -> LatestWhatsAppVersionResult = { await WhatsAppVersionResolver.fetchLatestWaWebVersion() }
+	) {
+		self.lifetime = lifetime
+		self.fetch = fetch
+	}
+
+	public func version() async -> WhatsAppVersion {
+		let now = ContinuousClock.now
+		if let cached, now - cached.fetchedAt < lifetime {
+			return cached.version
+		}
+		let result = await fetch()
+		if result.isLatest {
+			cached = (result.version, now)
+		}
+		return result.version
+	}
+
+	/// Drops the cached version, as after the server called it outdated.
+	public func invalidate() {
+		cached = nil
+	}
+}
