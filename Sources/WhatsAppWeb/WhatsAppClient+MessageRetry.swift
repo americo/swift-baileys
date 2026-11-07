@@ -148,7 +148,7 @@ extension WhatsAppClient {
 					localUserJID: authenticationState?.credentials.me?.id,
 					localUserLID: authenticationState?.credentials.me?.lid,
 					additionalAttributes: sent.peerStanza?.attributes ?? [:],
-					additionalNodes: sent.peerStanza?.nodes ?? []
+					additionalNodes: sent.peerStanza?.nodes ?? sent.metaNodes
 				)
 				try await sendNode(stanza)
 			}
@@ -192,7 +192,7 @@ extension WhatsAppClient {
 				localUserJID: authenticationState?.credentials.me?.id,
 				localUserLID: authenticationState?.credentials.me?.lid,
 				additionalAttributes: sent.peerStanza?.attributes ?? [:],
-				additionalNodes: sent.peerStanza?.nodes ?? []
+				additionalNodes: sent.peerStanza?.nodes ?? sent.metaNodes
 			)
 			try await sendNode(stanza)
 			recordRetryResend(for: retryKey)
@@ -228,7 +228,8 @@ extension WhatsAppClient {
 			timestamp: Date(),
 			peerStanza: additionalAttributes["category"] == "peer"
 				? PeerStanzaParts(attributes: additionalAttributes, nodes: additionalNodes)
-				: nil
+				: nil,
+			metaNodes: additionalNodes.filter { $0.tag == "meta" }
 		)
 		while recentSentMessageOrder.count > recentSentMessageLimit {
 			recentSentMessages.removeValue(forKey: recentSentMessageOrder.removeFirst())
@@ -288,6 +289,8 @@ struct RecentSentMessage: Sendable {
 	let timestamp: Date
 	/// What a peer message's stanza carried: without it a resend looks like a copy of a sent message.
 	let peerStanza: PeerStanzaParts?
+	/// The nodes that say what kind of message this is, such as a poll's `meta`.
+	let metaNodes: [BinaryNode]
 }
 
 struct PeerStanzaParts: Sendable {
